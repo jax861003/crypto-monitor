@@ -1,0 +1,15 @@
+{
+  "name": "crypto-monitor",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Workers + D1 加密货币价格/资金面监控面板（Binance/OKX/Bybit/Gate.io）",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev",
+    "db:init": "wrangler d1 execute crypto_monitor --file=./schema.sql"
+  },
+  "devDependencies": {
+    "wrangler": "^4.0.0"
+  }
+}

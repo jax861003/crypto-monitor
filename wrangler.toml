@@ -1,0 +1,34 @@
+name = "crypto-monitor"
+main = "src/index.js"
+compatibility_date = "2025-01-01"
+
+# 严格免费额度注意：
+# - Workers Free：10 万请求/天，单次调用 CPU 仅 10ms（含 Cron）。
+#   本采集是 I/O 密集（等网络不算 CPU），轻量观察池可塞进 10ms；若被掐，升级 $5/月 Paid（Cron CPU 提到 30s）。
+# - D1 Free：单库 500MB、500 万行读/天、10 万行写/天。15 分钟粒度下完全够用。
+# - KV Free：仅 1000 次写入/天 —— 本采集用 KV 会超限，强烈建议用 D1（见 README）。
+
+# ---------- 存储后端绑定（二选一）----------
+# 方案 A（推荐）：D1。先在 Cloudflare 创建 D1，再把 id 填到下面。
+[[d1_databases]]
+binding = "DB"
+database_name = "crypto_monitor"
+database_id = "REPLACE_WITH_YOUR_D1_ID"
+
+# 方案 B（不推荐）：KV。仅在你想用 STORAGE_TYPE=kv 时才需要。
+# 先在 Cloudflare 创建 KV 命名空间，取消下面注释并填 id。
+# [[kv_namespaces]]
+# binding = "KV"
+# id = "REPLACE_WITH_YOUR_KV_ID"
+
+# ---------- 部署时环境变量（Variables，非机密）----------
+# 手动部署：wrangler deploy 会自动带上这里；也可在 Cloudflare Dashboard → Settings → Variables 里配。
+[vars]
+# 存储后端：d1（默认，推荐）或 kv
+STORAGE_TYPE = "d1"
+# 自定义观察池（USDT 本位，逗号分隔）。留空则用代码内置默认值。
+# WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
+
+# 定时采集：每 15 分钟一次（UTC）。免费额度下建议不要低于 5 分钟。
+[triggers]
+crons = ["*/15 * * * *"]

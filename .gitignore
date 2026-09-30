@@ -1,0 +1,12 @@
+# 依赖
+node_modules/
+
+# Wrangler 本地产物
+.wrangler/
+.dev.vars
+.env
+*.log
+
+# 系统
+.DS_Store
+Thumbs.db
