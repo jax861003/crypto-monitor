@@ -42,7 +42,7 @@ export function serveDashboard() {
 <body>
 <header>
   <h1>加密货币资金面监控面板</h1>
-  <span class="sub">Binance · OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1/KV</span>
+  <span class="sub">Binance · OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
 </header>
 <div class="wrap">
   <div class="controls">
@@ -100,7 +100,7 @@ export function serveDashboard() {
   fetch('/api/config').then(r=>r.json()).then(cfg=>{
     WATCHLIST = cfg.watchlist || WATCHLIST;
     WATCHLIST.forEach(s => { const o=document.createElement('option'); o.value=s; o.textContent=s; symSel.appendChild(o); });
-    document.getElementById('status').textContent = '存储后端：' + (cfg.storage||'d1') + ' ｜ 观察池 ' + WATCHLIST.length + ' 个';
+    document.getElementById('status').textContent = '数据存于 Cloudflare D1 ｜ 观察池 ' + WATCHLIST.length + ' 个';
   }).catch(()=>{
     ['BTCUSDT','ETHUSDT','SOLUSDT'].forEach(s=>{ const o=document.createElement('option'); o.value=s; o.textContent=s; symSel.appendChild(o); });
   });

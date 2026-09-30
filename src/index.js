@@ -1,6 +1,6 @@
 import { collectAll } from './exchanges.js';
-import { getWatchlist, getStorageType, EXCHANGES, METRICS } from './config.js';
-import { saveSnapshots, querySnapshots } from './storage.js';
+import { getWatchlist, EXCHANGES, METRICS } from './config.js';
+import { insertSnapshots, querySnapshots } from './db.js';
 import { serveDashboard } from './dashboard.js';
 
 export default {
@@ -14,7 +14,6 @@ export default {
         watchlist: getWatchlist(env),
         exchanges: EXCHANGES,
         metrics: METRICS,
-        storage: getStorageType(env),
       });
     }
     if (path === '/api/health') return Response.json({ ok: true, ts: Date.now() });
@@ -33,8 +32,8 @@ export default {
 
 async function runIngest(env) {
   const rows = await collectAll(getWatchlist(env));
-  const n = await saveSnapshots(env, rows);
-  console.log(`[ingest] collected=${rows.length} inserted=${n} storage=${getStorageType(env)}`);
+  const n = await insertSnapshots(env.DB, rows);
+  console.log(`[ingest] collected=${rows.length} inserted=${n}`);
   return n;
 }
 
@@ -47,7 +46,7 @@ async function handleQuery(request, env) {
     symbol: (url.searchParams.get('symbol') || '').trim().toUpperCase(),
     metric: url.searchParams.get('metric') || 'price',
   };
-  const data = await querySnapshots(env, params);
+  const data = await querySnapshots(env.DB, params);
   return Response.json(data);
 }
 

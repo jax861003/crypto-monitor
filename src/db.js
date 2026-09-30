@@ -1,4 +1,4 @@
-// D1 写入 + 查询
+// D1 写入 + 查询（本监控唯一存储后端）
 import { EXCHANGES } from './config.js';
 
 const COLS = '(ts, exchange, symbol, price, volume_24h, open_interest, funding_rate, taker_buy_volume)';
@@ -33,7 +33,7 @@ export async function insertSnapshots(db, rows) {
 }
 
 // 按日期区间 / 交易所 / 币种查询（面板主路径）
-export async function queryD1(db, params) {
+export async function querySnapshots(db, params) {
   const where = [];
   const args = [];
   if (params.from != null) {
