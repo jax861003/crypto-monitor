@@ -25,9 +25,9 @@ compatibility_date = "2025-01-01"
 # ---------- 部署时环境变量（Variables，非机密）----------
 # 手动部署：wrangler deploy 会自动带上这里；也可在 Cloudflare Dashboard → Settings → Variables 里配。
 [vars]
-# 自定义观察池（USDT 本位，逗号分隔，大小写不限）。新增币种即看板新增一项；留空则用代码内置默认。
-# 示例：WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
-# WATCHLIST = ""
+# 自定义观察池（USDT 本位，逗号分隔，大小写不限）。新增币种即看板新增一项。
+# 留空则用代码内置默认 6 币。改完重跑 npx wrangler deploy 生效。
+WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
 
 # 定时采集：每 15 分钟一次（UTC）。免费额度下建议不要低于 5 分钟。
 [triggers]

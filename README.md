@@ -3,95 +3,83 @@
 定时从 **Binance / OKX / Bybit / Gate.io** 公开 API 采集价格、24h 成交量、合约持仓量(OI)、资金费率，
 存入 **Cloudflare D1**，并提供一个面板按**日期区间**查询走势与区间涨跌，给你的交易做参考。
 
-> 实现取舍：**代理指标（免费）** + **观察池用环境变量 `WATCHLIST` 配置** + **存储仅用 D1** + **部署用 Cloudflare Workers（非 Pages）**。
+> 实现取舍：**代理指标（免费）** + **观察池用环境变量 `WATCHLIST` 配置** + **存储仅用 D1** + **部署用 `wrangler deploy` 直接推 Cloudflare（不依赖 GitHub）**。
 
 ---
 
-## ⚠️ 先读：为什么不能用 Cloudflare Pages（你之前部署打不开的原因）
+## 先讲清楚两件事
 
-这项目是 **Cloudflare Workers** 形态，不是 Pages。两个坑：
-
-1. **Pages 不支持定时任务（Cron）。** Pages Functions 只处理 HTTP 请求，没有 `scheduled()`，也没有 Cron Triggers——这是 Cloudflare 的硬限制。本项目的自动采集（每 15 分钟抓一次数据）**只能在 Workers 上跑**，Pages 永远无法自动采集。
-2. **入口对不上。** Pages 认 `functions/` 目录或静态文件；本项目入口是 `src/index.js` + `wrangler.toml` 的 `main`，Pages 不认，所以页面直接打不开。
-
-**结论：用 Cloudflare Workers 部署，不要选 Pages。** Workers 同样支持「连接 GitHub 仓库」的纯 Dashboard 流程，不需要你本地敲 wrangler 命令。
+1. **自动化（每 15 分钟采集）是 Cloudflare Workers 自带的 Cron，不是 GitHub。** GitHub 只是代码存放处。所以**完全可以跳过 GitHub**，用 `wrangler deploy` 把代码推上去，Cron 照常跑。
+2. **不能用 Cloudflare Pages。** Pages 没有 Cron、也不认 `src/index.js` 入口，页面会直接打不开。本项目是 **Workers** 形态。
 
 ---
 
-## 部署总览（全程 Dashboard，不碰命令行）
+## 部署方式：直接 `wrangler deploy`（推荐，不碰 GitHub，也不产生 build token）
 
+前置：本地装了 **Node.js（≥18）**。
+
+### 步骤 0：建 D1 数据库（二选一）
+- **Dashboard**：Cloudflare 左侧 **Storage & Databases → D1 SQL Database → Create**，名称填 `crypto_monitor`。
+- **命令行**：`npx wrangler d1 create crypto_monitor`（记下返回的 id，本方式下面用不到）。
+
+> 建表不用手动：代码 `ensureSchema()` 会在首次采集/查询时自动建表。
+
+### 步骤 1：本地准备并登录
+```bash
+cd crypto-monitor
+npm install
+npx wrangler login        # 浏览器弹窗，授权你的 Cloudflare 账号（一次性）
 ```
-GitHub 仓库(jax861003/crypto-monitor)
-      │  Workers & Pages → 导入仓库（Git 集成，自动构建+部署）
-      ▼
-Cloudflare Worker(crypto-monitor)
-      ├─ Cron(每15分钟) → 并行 fetch 4 家 API → 归一化 → 写 D1(crypto_monitor)
-      └─ 面板 /  → /api/query → 读 D1 → Chart.js 折线 + 区间涨跌表
-```
 
----
-
-## 步骤 0：创建 D1 数据库（Dashboard，建空库即可）
-
-1. Cloudflare 左侧菜单 **Storage & Databases → D1 SQL Database → Create**。
-2. 名称填 `crypto_monitor`（随意，记住它），创建即可。
-
-> **不需要手动建表**：代码里 `ensureSchema()` 会在首次采集/查询时自动建表（`CREATE TABLE IF NOT EXISTS`），绑完 D1 直接访问 `/api/ingest` 即可。
-> 仓库里的 `schema.sql` 仅供你**参考表结构**，或在 D1 Console 手动建表用（可选）。若你要在 Console 手动建，请把 `schema.sql` 的**文件内容**（不是文件名）粘贴进 Console 执行——很多人把字面量 `schema.sql` 当命令粘进去，于是报 `near "schema": syntax error`。
-
-> 注意：本项目的 D1 **不写在仓库代码里**，全部在 Dashboard 绑定，所以你**不需要**去 GitHub 改任何 UUID。
-
-## 步骤 1：连接 GitHub 部署（不碰代码）
-
-1. Cloudflare 左侧 **Workers & Pages → Create application → 选 "Import a repository"（导入仓库）**。
-2. 授权连接你的 GitHub 账号，选仓库 **`crypto-monitor`**。
-3. **Worker 名称必须填 `crypto-monitor`**（要和 `wrangler.toml` 里的 `name` 一致，否则 Git 构建会失败）。
-4. 构建配置 **保持 Cloudflare 默认值即可，不要改**：
-   - **Build command（构建命令）**：**留空**（Workers Builds 会自动 `npm install`，无需手动写）
-   - **Deploy command（部署命令）**：保持默认 **`npx wrangler deploy`**
-   - **Preview command**：保持默认 **`npx wrangler preview`**
-   > 注意：Cloudflare 给的默认就是上面这三个，直接 Save and Deploy 即可。不要照某些教程写成 `npm install` / `npm run deploy`——能跑但多余，且与默认不一致。
-5. 点 **Save and Deploy**。Cloudflare 会自动拉仓库、安装依赖（构建环境默认行为）、执行 `npx wrangler deploy` 并部署。
-
-> 此时 Worker 已上线，**面板能打开**，但还没绑 D1，查询暂时为空——这是正常的，下一步绑定后就有数据。
-
-## 步骤 2：绑定 D1 数据库 + 设置环境变量（Dashboard）
-
-进入该 Worker：
-
+### 步骤 2：绑定 D1（Dashboard，变量名必须 `DB`）
+部署后（或部署前都行）进入该 Worker：
 - **Settings → Bindings → Add → D1 database**
-  - **Variable name（变量名）**：**`DB`**  ← 必须叫这个，代码里读的就是 `env.DB`
-  - **D1 database**：选你刚建的 **`crypto_monitor`**（或你自己起的名字）
-  - 保存。
-- **Settings → Variables and Secrets → Add variable**（Type 选 `Variable`，不是 Secret）
-  - **Name**：`WATCHLIST`，**Value**：`BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT`（可选，不填用代码内置默认 6 币）
+  - **Variable name**：**`DB`** ← 必须叫这个，代码读 `env.DB`
+  - **D1 database**：选你建的 `crypto_monitor`
   - 保存。
 
-> Dashboard 的绑定优先级高于 `wrangler.toml`，且两者自动合并；本项目 `wrangler.toml` 故意不写 D1 凭证，就是为了让你在此处自由绑定。
+> 若 `wrangler deploy` 报 "account" 相关错误，先确认 `npx wrangler login` 已成功；必要时在 `wrangler.toml` 顶部加 `account_id = "你的CF账号id"`（Dashboard 右侧「右上角头像 → 账号 ID」可查）。
 
-## 步骤 3：重新部署（让绑定生效）
+### 步骤 3：部署（一条命令搞定）
+```bash
+npx wrangler deploy
+```
+这一步把 `src/index.js` + `wrangler.toml` 里的配置（**Cron 每 15 分钟** + **WATCHLIST 变量**）全部推上去。Cron 自动生效，无需额外设置。
 
-回到该 Worker → **Deployments → 右上角 "Retry"/"Deploy" 重新部署一次**（或任意推一次 GitHub 也会触发）。
-重新部署后，D1 绑定和 `WATCHLIST` 变量才真正挂到运行的 Worker 上。
-
-## 步骤 4：验证
-
-- 打开 `https://crypto-monitor.<你的子域>.workers.dev/` 就是面板。
-- Cron 每 15 分钟自动采集。**想立刻出数**，浏览器访问一次：
+### 步骤 4：验证
+- 打开 `https://crypto-monitor.<你的子域>.workers.dev/` 即面板。
+- **想立刻出数**（不必等 Cron）：浏览器访问一次
   `https://crypto-monitor.<你的子域>.workers.dev/api/ingest`
   返回 `{"ok":true,...}` 即已提交后台采集；几秒后回面板查询。
 - 健康检查：`/api/health` 应返回 `{"ok":true,...}`。
 
 ---
 
-## 面板用法
+## 观察池 `WATCHLIST`（每加一个币，看板自动多一项）
 
-打开根路径面板：
+- 改 `wrangler.toml` 里 `[vars]` 的 `WATCHLIST`（逗号分隔，**大小写不限**），改完重跑 `npx wrangler deploy`。
+- 或在 Cloudflare Dashboard → Worker → Settings → Variables 里加 `WATCHLIST`（Type 选 `Variable`）。
+- 留空则用代码内置默认 6 币（BTC/ETH/SOL/BNB/XRP/DOGE）。
 
-- **币种**：下拉框 = 你 `WATCHLIST` 里的每一项（自动生成，加一个币就多一项）。
-- **指标**：价格 / 24h 成交量 / 合约持仓量(OI) / 资金费率。
-- **交易所**：四个复选框（Binance/OKX/Bybit/Gate），可多选叠加对比。
-- **开始/结束时间**：选日期区间，点「查询」看折线 + 区间涨跌汇总表（首值/末值/涨跌幅）。
+---
+
+## （可选）GitHub 仅作代码备份，不参与部署
+
+代码已推到 `https://github.com/jax861003/crypto-monitor`，纯备份/版本管理用。
+- 改完代码：`git commit` + `git push` 备份。
+- **部署仍用 `npx wrangler deploy`**，跟 GitHub 无关。
+- 仓库默认分支是 `main`，本地用 `git checkout main` 跟踪即可。
+
+> 不需要在 Cloudflare 里连这个 GitHub 仓库，也不要去配 Workers Builds / build token——那套 Git 集成正是之前部署卡住的根源，现在完全绕开。
+
+---
+
+## 本地先跑通（不用 Cloudflare 也能验证代码逻辑）
+```bash
+npm install
+node scripts/local-check.mjs
+```
+会验证：根路径返回面板 HTML、`/api/health` 正常、`/api/config` 返回观察池（含大小写归一）。无需网络、无需 Cloudflare。
 
 ---
 
@@ -99,10 +87,10 @@ Cloudflare Worker(crypto-monitor)
 
 | 名称 | 类型 | 在哪填 | 必填 | 说明 |
 |---|---|---|---|---|
-| `DB` | D1 绑定 | Worker Settings → Bindings → D1 database | **是** | 变量名必须 `DB`，对应代码 `env.DB`；绑定你在 Dashboard 建的数据库（如 `crypto_monitor`） |
-| `WATCHLIST` | Variable | Dashboard Variables 或 `wrangler.toml [vars]` | 否 | 观察池，逗号分隔，大小写不限；留空=内置默认 6 币 |
+| `DB` | D1 绑定 | Worker Settings → Bindings → D1 database | **是** | 变量名必须 `DB`，对应代码 `env.DB`；绑定你的 `crypto_monitor` 库 |
+| `WATCHLIST` | Variable | `wrangler.toml [vars]` 或 Dashboard Variables | 否 | 观察池，逗号分隔，大小写不限；留空=内置默认 6 币 |
 
-> **不需要**在仓库 `wrangler.toml` 里填任何 D1 的 UUID——D1 绑定全部在 Cloudflare Dashboard 完成。
+> 部署时**不需要**在 `wrangler.toml` 里填任何 D1 的 UUID——D1 绑定在 Cloudflare Dashboard 完成（见步骤 2）。
 
 ---
 
@@ -127,7 +115,7 @@ Cloudflare Worker(crypto-monitor)
 
 ---
 
-## `schema.sql`（首次建表用，可直接在 D1 Console 执行）
+## `schema.sql`（首次建表用，可直接在 D1 Console 执行；通常由代码自动建）
 
 ```sql
 CREATE TABLE IF NOT EXISTS market_snapshot (
@@ -153,18 +141,17 @@ CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbo
 ```
 crypto-monitor/
 ├─ wrangler.toml        # Worker 配置：入口 src/index.js + 15 分钟 Cron + WATCHLIST；D1 绑定留空，靠 Dashboard 完成
-├─ schema.sql           # D1 表结构
+├─ schema.sql           # D1 表结构（通常由代码自动建）
 ├─ package.json
 ├─ .gitignore
 ├─ LICENSE
 ├─ src/
 │  ├─ index.js          # Worker 入口（fetch + 定时 scheduled + /api/config）
-│  ├─ config.js         # 环境变量解析：观察池 WATCHLIST
+│  ├─ config.js         # 环境变量解析：观察池 WATCHLIST（大小写归一）
 │  ├─ exchanges.js      # 四家采集 + 归一化
-│  ├─ db.js             # D1 写入 + 区间查询
+│  ├─ db.js             # D1 写入 + 区间查询 + 自动建表 ensureSchema
 │  └─ dashboard.js      # 查询 API + 内联面板
-└─ scripts/smoke.mjs    # 本地端点校验（需本地 Node，非部署必需）
+└─ scripts/
+   ├─ local-check.mjs   # 本地逻辑验证（无需网络/Cloudflare）
+   └─ smoke.mjs         # 本地校验四家交易所端点（需网络）
 ```
-
-> 部署是 **Dashboard Git 集成**自动完成，不需要本地 `wrangler deploy`。
-> 如果你坚持想用 Pages：Pages 无 Cron，自动采集会失效，只能靠外部定时器访问 `/api/ingest` 或另起一个 Cron Worker 来触发——不推荐，直接用 Workers 最简单。
