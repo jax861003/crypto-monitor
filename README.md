@@ -46,10 +46,12 @@ Cloudflare Worker(crypto-monitor)
 1. Cloudflare 左侧 **Workers & Pages → Create application → 选 "Import a repository"（导入仓库）**。
 2. 授权连接你的 GitHub 账号，选仓库 **`crypto-monitor`**。
 3. **Worker 名称必须填 `crypto-monitor`**（要和 `wrangler.toml` 里的 `name` 一致，否则 Git 构建会失败）。
-4. 构建配置：
-   - **Build command（构建命令）**：`npm install`（或留空）
-   - **Deploy command（部署命令）**：`npm run deploy`（= `wrangler deploy`）
-5. 点 **Save and Deploy**。Cloudflare 会自动拉仓库、安装依赖、构建并部署。
+4. 构建配置 **保持 Cloudflare 默认值即可，不要改**：
+   - **Build command（构建命令）**：**留空**（Workers Builds 会自动 `npm install`，无需手动写）
+   - **Deploy command（部署命令）**：保持默认 **`npx wrangler deploy`**
+   - **Preview command**：保持默认 **`npx wrangler preview`**
+   > 注意：Cloudflare 给的默认就是上面这三个，直接 Save and Deploy 即可。不要照某些教程写成 `npm install` / `npm run deploy`——能跑但多余，且与默认不一致。
+5. 点 **Save and Deploy**。Cloudflare 会自动拉仓库、安装依赖（构建环境默认行为）、执行 `npx wrangler deploy` 并部署。
 
 > 此时 Worker 已上线，**面板能打开**，但还没绑 D1，查询暂时为空——这是正常的，下一步绑定后就有数据。
 
