@@ -34,9 +34,10 @@ Cloudflare Worker(crypto-monitor)
 ## 步骤 0：创建 D1 数据库（Dashboard，建空库即可）
 
 1. Cloudflare 左侧菜单 **Storage & Databases → D1 SQL Database → Create**。
-2. 名称填 `crypto_monitor`（随意，记住它），创建。
-3. 进入该数据库 → **Console**，把本项目 `schema.sql`（见文末）的内容粘贴执行，建立数据表。
-   （这一步只是建空表，方便后面采集写入；也可以等部署后在 Console 执行。）
+2. 名称填 `crypto_monitor`（随意，记住它），创建即可。
+
+> **不需要手动建表**：代码里 `ensureSchema()` 会在首次采集/查询时自动建表（`CREATE TABLE IF NOT EXISTS`），绑完 D1 直接访问 `/api/ingest` 即可。
+> 仓库里的 `schema.sql` 仅供你**参考表结构**，或在 D1 Console 手动建表用（可选）。若你要在 Console 手动建，请把 `schema.sql` 的**文件内容**（不是文件名）粘贴进 Console 执行——很多人把字面量 `schema.sql` 当命令粘进去，于是报 `near "schema": syntax error`。
 
 > 注意：本项目的 D1 **不写在仓库代码里**，全部在 Dashboard 绑定，所以你**不需要**去 GitHub 改任何 UUID。
 
