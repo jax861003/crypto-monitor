@@ -31,32 +31,16 @@ Cloudflare Worker(crypto-monitor)
 
 ---
 
-## 步骤 0：创建 D1 数据库（Dashboard）
+## 步骤 0：创建 D1 数据库（Dashboard，建空库即可）
 
 1. Cloudflare 左侧菜单 **Storage & Databases → D1 SQL Database → Create**。
-2. 名称填 `crypto_monitor`，创建。
-3. 创建成功后会显示一串 **Database ID（uuid）**，**复制下来**，下一步要用。
-4. 进入该数据库 → **Console**，把本项目 `schema.sql` 的内容粘进去执行（或在仓库里也能看到这个文件）。也可以不加表，首次部署后用 Dashboard 的 Console 执行建表 SQL（见文末 `schema.sql` 内容）。
+2. 名称填 `crypto_monitor`（随意，记住它），创建。
+3. 进入该数据库 → **Console**，把本项目 `schema.sql`（见文末）的内容粘贴执行，建立数据表。
+   （这一步只是建空表，方便后面采集写入；也可以等部署后在 Console 执行。）
 
-## 步骤 1：修改 `wrangler.toml`（填 D1 的 id）
+> 注意：本项目的 D1 **不写在仓库代码里**，全部在 Dashboard 绑定，所以你**不需要**去 GitHub 改任何 UUID。
 
-打开仓库里的 `wrangler.toml`，把这一行的占位符换成你的真实 D1 id：
-
-```toml
-database_id = "REPLACE_WITH_YOUR_D1_ID"   →   改成   database_id = "你复制的uuid"
-```
-
-> 这个 id 必填，否则部署时绑定失效、采集写不进库。
-> （你也可以在 GitHub 网页上直接编辑这个文件，改完提交即可。）
-
-观察池 `WATCHLIST` 同样在 `wrangler.toml` 的 `[vars]` 里改（可选，留空=内置默认 6 币）：
-
-```toml
-[vars]
-WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
-```
-
-## 步骤 2：Dashboard 导入 GitHub 仓库（创建 Worker）
+## 步骤 1：连接 GitHub 部署（不碰代码）
 
 1. Cloudflare 左侧 **Workers & Pages → Create application → 选 "Import a repository"（导入仓库）**。
 2. 授权连接你的 GitHub 账号，选仓库 **`crypto-monitor`**。
@@ -66,21 +50,26 @@ WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
    - **Deploy command（部署命令）**：`npm run deploy`（= `wrangler deploy`）
 5. 点 **Save and Deploy**。Cloudflare 会自动拉仓库、安装依赖、构建并部署。
 
-> 之后你只要 `git push` 到 GitHub，Cloudflare 就会自动重新构建部署（Git 集成）。
+> 此时 Worker 已上线，**面板能打开**，但还没绑 D1，查询暂时为空——这是正常的，下一步绑定后就有数据。
 
-## 步骤 3：绑定 D1 数据库 + 设置环境变量（Dashboard）
+## 步骤 2：绑定 D1 数据库 + 设置环境变量（Dashboard）
 
-部署成功后，进入该 Worker：
+进入该 Worker：
 
 - **Settings → Bindings → Add → D1 database**
-  - Variable name（变量名）：**`DB`**  ← 必须叫这个，代码里读的就是 `env.DB`
-  - D1 database：选你建的 **`crypto_monitor`**
+  - **Variable name（变量名）**：**`DB`**  ← 必须叫这个，代码里读的就是 `env.DB`
+  - **D1 database**：选你刚建的 **`crypto_monitor`**（或你自己起的名字）
   - 保存。
 - **Settings → Variables and Secrets → Add variable**（Type 选 `Variable`，不是 Secret）
-  - Name：`WATCHLIST`，Value：`BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT`（可选，不填用默认）
+  - **Name**：`WATCHLIST`，**Value**：`BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT`（可选，不填用代码内置默认 6 币）
   - 保存。
 
-> 如果 `wrangler.toml` 里已经写了 `WATCHLIST`，这里不填也行；两者同时有则以 Dashboard 为准。
+> Dashboard 的绑定优先级高于 `wrangler.toml`，且两者自动合并；本项目 `wrangler.toml` 故意不写 D1 凭证，就是为了让你在此处自由绑定。
+
+## 步骤 3：重新部署（让绑定生效）
+
+回到该 Worker → **Deployments → 右上角 "Retry"/"Deploy" 重新部署一次**（或任意推一次 GitHub 也会触发）。
+重新部署后，D1 绑定和 `WATCHLIST` 变量才真正挂到运行的 Worker 上。
 
 ## 步骤 4：验证
 
@@ -107,9 +96,10 @@ WATCHLIST = "BTCUSDT,ETHUSDT,SOLUSDT,BNBUSDT,XRPUSDT,DOGEUSDT"
 
 | 名称 | 类型 | 在哪填 | 必填 | 说明 |
 |---|---|---|---|---|
-| `DB` | D1 绑定 | Worker Settings → Bindings → D1 database | **是** | 变量名必须 `DB`，对应代码 `env.DB`；绑定你的 `crypto_monitor` 库 |
-| `REPLACE_WITH_YOUR_D1_ID` | D1 id | `wrangler.toml` 的 `database_id` | **是** | 换成真实 D1 uuid |
-| `WATCHLIST` | Variable | `wrangler.toml [vars]` 或 Dashboard Variables | 否 | 观察池，逗号分隔，大小写不限；留空=内置默认 6 币 |
+| `DB` | D1 绑定 | Worker Settings → Bindings → D1 database | **是** | 变量名必须 `DB`，对应代码 `env.DB`；绑定你在 Dashboard 建的数据库（如 `crypto_monitor`） |
+| `WATCHLIST` | Variable | Dashboard Variables 或 `wrangler.toml [vars]` | 否 | 观察池，逗号分隔，大小写不限；留空=内置默认 6 币 |
+
+> **不需要**在仓库 `wrangler.toml` 里填任何 D1 的 UUID——D1 绑定全部在 Cloudflare Dashboard 完成。
 
 ---
 
@@ -159,7 +149,7 @@ CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbo
 
 ```
 crypto-monitor/
-├─ wrangler.toml        # Worker 配置：入口 src/index.js + D1 绑定 DB + 15 分钟 Cron + WATCHLIST
+├─ wrangler.toml        # Worker 配置：入口 src/index.js + 15 分钟 Cron + WATCHLIST；D1 绑定留空，靠 Dashboard 完成
 ├─ schema.sql           # D1 表结构
 ├─ package.json
 ├─ .gitignore

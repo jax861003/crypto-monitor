@@ -8,11 +8,19 @@ compatibility_date = "2025-01-01"
 # - D1 Free：单库 500MB、500 万行读/天、10 万行写/天。15 分钟粒度下完全够用。
 
 # ---------- 存储后端：仅使用 D1 ----------
-# 先在 Cloudflare 创建 D1，再把返回的 id 填到下面 database_id。
-[[d1_databases]]
-binding = "DB"
-database_name = "crypto_monitor"
-database_id = "REPLACE_WITH_YOUR_D1_ID"
+# 推荐做法（Dashboard Git 集成，零代码改动）：
+#   1. 直接连接 GitHub 部署，本文件不写任何 D1 凭证，Worker 正常上线。
+#   2. 部署后到 Cloudflare Dashboard → 该 Worker → Settings → Bindings → Add → D1 database
+#      变量名(Variable name)填  DB ，选择你建的数据库（库名随意，例如 crypto_monitor），保存。
+#   3. 回到该 Worker → Deployments → 重新部署一次，绑定即生效。
+# D1 绑定完全在 Dashboard 完成，仓库里无需填 UUID。
+#
+# 如果你希望连库都自动建（零配置）：取消下面这段注释再部署，Cloudflare 会自动创建
+# 名为 crypto_monitor 的 D1 并绑定到 DB（需 wrangler ≥ 4.45）。
+# [[d1_databases]]
+# binding = "DB"
+# database_name = "crypto_monitor"
+# database_id = "REPLACE_WITH_YOUR_D1_ID"   # 想用自己的库就把这行填成真实 UUID；否则删掉此行=自动供应
 
 # ---------- 部署时环境变量（Variables，非机密）----------
 # 手动部署：wrangler deploy 会自动带上这里；也可在 Cloudflare Dashboard → Settings → Variables 里配。
