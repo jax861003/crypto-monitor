@@ -1,6 +1,8 @@
-// 四家交易所公开 REST API 采集 + 归一化
-// 采集策略：按观察池逐个小请求（免费版 Worker 单次 CPU 仅 10ms，拉全市场大 JSON
-// 光解析就会超限被静默掐死）。6 币 ≈ 45 个子请求，在免费版 50 子请求上限内。
+// 四家→三家交易所公开 REST API 采集 + 归一化
+// 数据源：OKX / Bybit / Gate.io（Binance 已按需求移除——它对 Cloudflare 边缘 IP 地理封锁不友好）。
+// 采集策略：OKX/Gate 用 bulk 接口（响应适中），Bybit 按观察池逐个小请求；
+// 免费版 Worker 单次 CPU 仅 10ms，拉全市场大 JSON 光解析就会超限被静默掐死。
+// 7 币 ≈ 37 个子请求，在免费版 50 子请求上限内。
 // 观察池（WATCHLIST）可经环境变量在部署时覆盖，见 src/config.js。
 // 仅支持 USDT 本位交易对，命名统一为 <币种>USDT，如 BTCUSDT、ETHUSDT。
 
@@ -22,52 +24,6 @@ async function fetchJson(url, ms = 8000) {
 function num(v) {
   const n = Number(v);
   return Number.isFinite(n) ? n : null;
-}
-
-// ---------- Binance ----------
-// api.binance.com 对部分 Cloudflare 边缘节点返回 403/451（地理封锁）。
-// data-api.binance.vision 是官方公开行情镜像，通常不受封锁；失败再回退主域。
-const BINANCE_SPOT_BASES = ['https://data-api.binance.vision', 'https://api.binance.com'];
-
-async function collectBinance(watch) {
-  const syms = [...watch].filter((s) => s.endsWith('USDT'));
-  if (!syms.length) return [];
-  // 只拉观察池（symbols 参数 = URL 编码的 JSON 数组），避免全市场大 JSON
-  let spot = null;
-  let lastErr = null;
-  for (const base of BINANCE_SPOT_BASES) {
-    try {
-      spot = await fetchJson(`${base}/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(syms))}`);
-      break;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  if (!spot) throw lastErr || new Error('binance spot: all bases failed');
-  const map = {};
-  for (const t of Array.isArray(spot) ? spot : []) {
-    map[t.symbol] = {
-      exchange: 'binance',
-      symbol: t.symbol,
-      price: num(t.lastPrice),
-      volume_24h: num(t.quoteVolume),
-      open_interest: null,
-      funding_rate: null,
-    };
-  }
-  // 资金费率：一次拉全（响应小，失败只降级为 null）；持仓量：逐 symbol
-  const prem = await fetchJson('https://fapi.binance.com/fapi/v1/premiumIndex').catch(() => []);
-  const fr = new Map((Array.isArray(prem) ? prem : []).map((p) => [p.symbol, num(p.fundingRate)]));
-  await Promise.allSettled(
-    Object.keys(map).map(async (s) => {
-      try {
-        const r = await fetchJson(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${s}`);
-        map[s].open_interest = num(r.openInterest);
-      } catch {}
-    })
-  );
-  for (const [s, v] of Object.entries(map)) if (fr.has(s)) v.funding_rate = fr.get(s);
-  return Object.values(map);
 }
 
 // ---------- OKX ----------
@@ -180,9 +136,8 @@ function norm(s) {
   return String(s).toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
-// 并行采集四家，单家失败不影响其他家；返回 { rows, detail }（detail 供排障）
+// 并行采集三家，单家失败不影响其他家；返回 { rows, detail }（detail 供排障）
 export const EXCHANGE_FNS = [
-  ['binance', collectBinance],
   ['okx', collectOkx],
   ['bybit', collectBybit],
   ['gate', collectGate],

@@ -42,7 +42,7 @@ export function serveDashboard() {
 <body>
 <header>
   <h1>加密货币资金面监控面板</h1>
-  <span class="sub">Binance · OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
+  <span class="sub">OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
 </header>
 <div class="wrap">
   <div class="controls">
@@ -87,7 +87,7 @@ export function serveDashboard() {
 <script>
   const EXCHANGES = ${JSON.stringify(EXCHANGES)};
   const METRICS = ${JSON.stringify(METRICS)};
-  const COLORS = { binance:'#f3ba2f', okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
+  const COLORS = { okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
 
   const symSel = document.getElementById('symbol');
   const metSel = document.getElementById('metric');
@@ -107,7 +107,13 @@ export function serveDashboard() {
 
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7*864e5);
-  const fmt = d => d.toISOString().slice(0,16);
+  // ⚠️ 必须用本地时间格式化填 datetime-local：toISOString() 是 UTC，
+  // 而 new Date(input.value) 按本地时区解析，GMT+8 下会把查询窗口结束时间提前 8 小时，
+  // 导致刚采集的数据全部落在窗口之外、面板永远「命中 0 条」。
+  const fmt = d => {
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+  };
   document.getElementById('to').value = fmt(now);
   document.getElementById('from').value = fmt(weekAgo);
 

@@ -1,10 +1,11 @@
 # 加密货币资金面监控面板（Cloudflare Workers 单文件部署版）
 
-定时从 **Binance / OKX / Bybit / Gate.io** 公开 API 采集价格、24h 成交量、合约持仓量(OI)、资金费率，
+定时从 **OKX / Bybit / Gate.io** 公开 API 采集价格、24h 成交量、合约持仓量(OI)、资金费率，
 存入 **Cloudflare D1**，并提供一个面板按**日期区间**查询走势与区间涨跌，给你的交易做参考。
 
 > 实现取舍：**代理指标（免费）** + 观察池用环境变量 `WATCHLIST` 配置（大小写不限）+ 存储仅用 D1
 > + **部署方式 = 直接上传 `worker.js` 到 Cloudflare Dashboard（不依赖 GitHub，不依赖 wrangler CLI）**。
+> **Binance 已移除**——它对 Cloudflare 边缘 IP 地理封锁不友好（403/451），按需求直接舍弃。
 
 ---
 
@@ -83,7 +84,7 @@ const DEFAULT_WATCHLIST = [
 
 ## 免费额度关键约束
 
-- **Workers Free**：10 万请求/天；单次调用 CPU 仅 10ms（含 Cron）。采集是 I/O 密集，轻量观察池通常能塞进。若被掐，升 **$5/月 Paid**（Cron CPU 提到 30s）。
+- **Workers Free**：10 万请求/天；单次调用 CPU 仅 10ms（含 Cron）。采集已按观察池拆成小请求，7 币 ≈ 37 个子请求（免费版上限 50），观察池超过 ~10 个币会撞上限。若 CPU 仍被掐，升 **$5/月 Paid**（Cron CPU 提到 30s）。
 - **D1 Free**：单库 500MB、500 万行读/天、10 万行写/天。
 - **Binance 地理封锁**：`api.binance.com` 对美区 IP 返回 451。Cloudflare 边缘多在非美区，常能通但不保证。代码已优雅降级：Binance 挂了只记另三家。
 
@@ -106,7 +107,7 @@ const DEFAULT_WATCHLIST = [
 
 - **币种**：= 你 `WATCHLIST` 里的每一项（自动生成）。
 - **指标**：价格 / 24h 成交量 / 合约持仓量(OI) / 资金费率。
-- **交易所**：四个复选框（Binance/OKX/Bybit/Gate），可多选叠加对比。
+- **交易所**：三个复选框（OKX/Bybit/Gate），可多选叠加对比。
 - **开始/结束时间**：选日期区间，点「查询」看折线 + 区间涨跌汇总表（首值/末值/涨跌幅）。
 
 ---
@@ -127,15 +128,15 @@ const DEFAULT_WATCHLIST = [
 ### 面板能打开但查询无数据
 - 访问一次 `/api/ingest` —— 现在**同步执行并直接返回每家交易所的结果**：
   ```json
-  {"ok":true,"collected":24,"inserted":24,"detail":[
-    {"exchange":"binance","ok":true,"count":6},
-    {"exchange":"okx","ok":true,"count":6},
-    {"exchange":"bybit","ok":false,"count":0,"error":"HTTP 451 ..."}
+  {"ok":true,"collected":21,"inserted":21,"detail":[
+    {"exchange":"okx","ok":true,"count":7},
+    {"exchange":"bybit","ok":true,"count":7},
+    {"exchange":"gate","ok":true,"count":7}
   ],"error":null}
   ```
   - `detail` 里哪家 `ok:false`，错误原因一目了然（无需看日志）。
   - `inserted > 0` 后回面板查询即可；Cron 之后每 15 分钟自动补数据。
-- **Binance 403/451**：`api.binance.com` 对部分 Cloudflare 边缘节点有地理封锁。代码优先走官方公开行情镜像 **`data-api.binance.vision`**（通常不受封锁），失败自动回退主域；两个都挂时 `detail` 会显示真实错误，且不影响另外三家。合约资金费率/持仓量走 `fapi.binance.com`，失败只降级为空值。
+- **Binance 已移除**：`api.binance.com` 对 Cloudflare 边缘 IP 地理封锁不友好（403/451），按需求直接舍弃数据源。库里若有历史 `binance` 行不影响查询（面板交易所复选框已不含它）。
 - **观察池别超过 ~7 个币**：免费版 Worker 单次调用上限 50 个子请求，6 币 ≈ 45 个；超了会有一部分交易所采不满。
 - 采集改为按观察池逐个小请求（免费版 10ms CPU 拉不动全市场大 JSON，这是早期「查询一直 0 条」的根因）。
 

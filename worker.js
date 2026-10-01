@@ -23,7 +23,7 @@ const DEFAULT_WATCHLIST = [
   'DOGEUSDT',
 ];
 
-const EXCHANGES = ['binance', 'okx', 'bybit', 'gate'];
+const EXCHANGES = ['okx', 'bybit', 'gate'];
 const METRICS = [
   { key: 'price', label: '价格' },
   { key: 'volume_24h', label: '24h 成交量' },
@@ -75,56 +75,11 @@ function num(v) {
 }
 
 // ---------- 采集策略说明 ----------
-// 免费版 Worker 单次调用 CPU 仅 10ms：拉全市场大 JSON（Binance/Bybit 全 ticker ≈ 1MB+），
+// 数据源：OKX / Bybit / Gate.io（Binance 已按需求移除——它对 Cloudflare 边缘 IP 地理封锁不友好）。
+// 免费版 Worker 单次调用 CPU 仅 10ms：拉全市场大 JSON（如 Bybit 全 ticker ≈ 1MB+），
 // 光 JSON.parse 就会超限，后台任务被静默掐死，D1 一条都写不进。
-// 因此全部改为「按观察池逐个小请求」，单个响应仅几百字节；同时控制总子请求数在免费版 50 上限内。
-// 6 币 ≈ 45 个子请求（Binance 8 + OKX 13 + Bybit 12 + Gate 12）；观察池超过 ~7 个币会撞上限。
-
-// ---------- Binance ----------
-// api.binance.com 对部分 Cloudflare 边缘节点返回 403/451（地理封锁）。
-// data-api.binance.vision 是官方公开行情镜像，专门服务公共市场数据，通常不受封锁；失败再回退主域。
-const BINANCE_SPOT_BASES = ['https://data-api.binance.vision', 'https://api.binance.com'];
-
-async function collectBinance(watch) {
-  const syms = [...watch].filter((s) => s.endsWith('USDT'));
-  if (!syms.length) return [];
-  // 只拉观察池（symbols 参数 = URL 编码的 JSON 数组），避免全市场大 JSON
-  let spot = null;
-  let lastErr = null;
-  for (const base of BINANCE_SPOT_BASES) {
-    try {
-      spot = await fetchJson(`${base}/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(syms))}`);
-      break;
-    } catch (e) {
-      lastErr = e;
-    }
-  }
-  if (!spot) throw lastErr || new Error('binance spot: all bases failed');
-  const map = {};
-  for (const t of Array.isArray(spot) ? spot : []) {
-    map[t.symbol] = {
-      exchange: 'binance',
-      symbol: t.symbol,
-      price: num(t.lastPrice),
-      volume_24h: num(t.quoteVolume),
-      open_interest: null,
-      funding_rate: null,
-    };
-  }
-  // 资金费率：一次拉全（响应小，失败只降级为 null）；持仓量：逐 symbol
-  const prem = await fetchJson('https://fapi.binance.com/fapi/v1/premiumIndex').catch(() => []);
-  const fr = new Map((Array.isArray(prem) ? prem : []).map((p) => [p.symbol, num(p.fundingRate)]));
-  await Promise.allSettled(
-    Object.keys(map).map(async (s) => {
-      try {
-        const r = await fetchJson(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${s}`);
-        map[s].open_interest = num(r.openInterest);
-      } catch {}
-    })
-  );
-  for (const [s, v] of Object.entries(map)) if (fr.has(s)) v.funding_rate = fr.get(s);
-  return Object.values(map);
-}
+// 因此 OKX/Gate 用 bulk 接口（响应适中），Bybit 按观察池逐个小请求，控制总子请求数在免费版 50 上限内。
+// 7 币 ≈ 37 个子请求（OKX 9 + Bybit 14 + Gate 14）；观察池超过 ~10 个币会撞上限。
 
 // ---------- OKX ----------
 async function collectOkx(watch) {
@@ -233,7 +188,6 @@ async function collectGate(watch) {
 
 // 并行采集四家，单家失败不影响其他家；返回 { rows, detail }（detail 供 /api/ingest 直接返回给浏览器排障）
 const EXCHANGE_FNS = [
-  ['binance', collectBinance],
   ['okx', collectOkx],
   ['bybit', collectBybit],
   ['gate', collectGate],
@@ -353,6 +307,24 @@ async function querySnapshots(db, params) {
   return { metric: params.metric, count: results.length, rows: results };
 }
 
+// 诊断：库里到底有什么（总数 / 各交易所 / 各币种 / 时间范围）
+async function debugStats(db) {
+  await ensureSchema(db);
+  const range = await db
+    .prepare('SELECT COUNT(*) AS total, MIN(ts) AS oldest, MAX(ts) AS latest FROM market_snapshot')
+    .all();
+  const byEx = await db.prepare('SELECT exchange, COUNT(*) AS n FROM market_snapshot GROUP BY exchange').all();
+  const bySym = await db.prepare('SELECT symbol, COUNT(*) AS n FROM market_snapshot GROUP BY symbol').all();
+  const r = (range.results && range.results[0]) || {};
+  return {
+    total: r.total || 0,
+    oldest_ts: r.oldest || null,
+    latest_ts: r.latest || null,
+    by_exchange: byEx.results || [],
+    by_symbol: bySym.results || [],
+  };
+}
+
 // ============================================================
 // 面板（内联 HTML，单 Worker 直接托管，无需静态资源绑定）
 // ============================================================
@@ -396,7 +368,7 @@ function serveDashboard() {
 <body>
 <header>
   <h1>加密货币资金面监控面板</h1>
-  <span class="sub">Binance · OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
+  <span class="sub">OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
 </header>
 <div class="wrap">
   <div class="controls">
@@ -441,7 +413,7 @@ function serveDashboard() {
 <script>
   const EXCHANGES = ${JSON.stringify(EXCHANGES)};
   const METRICS = ${JSON.stringify(METRICS)};
-  const COLORS = { binance:'#f3ba2f', okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
+  const COLORS = { okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
 
   const symSel = document.getElementById('symbol');
   const metSel = document.getElementById('metric');
@@ -461,7 +433,13 @@ function serveDashboard() {
 
   const now = new Date();
   const weekAgo = new Date(now.getTime() - 7*864e5);
-  const fmt = d => d.toISOString().slice(0,16);
+  // ⚠️ 必须用本地时间格式化填 datetime-local：toISOString() 是 UTC，
+  // 而 new Date(input.value) 按本地时区解析，GMT+8 下会把查询窗口结束时间提前 8 小时，
+  // 导致刚采集的数据全部落在窗口之外、面板永远「命中 0 条」。
+  const fmt = d => {
+    const p = n => String(n).padStart(2, '0');
+    return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) + 'T' + p(d.getHours()) + ':' + p(d.getMinutes());
+  };
   document.getElementById('to').value = fmt(now);
   document.getElementById('from').value = fmt(weekAgo);
 
@@ -631,6 +609,15 @@ export default {
         });
       }
       if (path === '/api/health') return Response.json({ ok: true, ts: Date.now() });
+      if (path === '/api/debug') {
+        if (!env.DB) {
+          return Response.json(
+            { ok: false, error: 'D1 尚未绑定：请在 Worker → Settings → Bindings 添加变量名为 DB 的 D1 绑定并重新部署。' },
+            { status: 200 }
+          );
+        }
+        return Response.json({ ok: true, ...(await debugStats(env.DB)) });
+      }
       if (path === '/api/ingest') {
         if (!env.DB) {
           return Response.json(

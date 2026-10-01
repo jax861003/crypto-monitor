@@ -1,7 +1,17 @@
 // 运行期配置：全部来自 Cloudflare 部署时配置的 Variables（wrangler.toml [vars] 或 Dashboard）
-import { WATCHLIST as DEFAULT_WATCHLIST } from './exchanges.js';
 
-export const EXCHANGES = ['binance', 'okx', 'bybit', 'gate'];
+// ⚠️ 这是「代码内置默认」观察池；部署时用环境变量 WATCHLIST 覆盖即可。
+const DEFAULT_WATCHLIST = [
+  'BTCUSDT',
+  'ETHUSDT',
+  'SOLUSDT',
+  'BNBUSDT',
+  'XRPUSDT',
+  'DOGEUSDT',
+];
+
+// 数据源：OKX / Bybit / Gate.io（Binance 已按需求移除——它对 Cloudflare 边缘 IP 地理封锁不友好）
+export const EXCHANGES = ['okx', 'bybit', 'gate'];
 export const METRICS = [
   { key: 'price', label: '价格' },
   { key: 'volume_24h', label: '24h 成交量' },
