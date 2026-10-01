@@ -108,3 +108,24 @@ const DEFAULT_WATCHLIST = [
 - **指标**：价格 / 24h 成交量 / 合约持仓量(OI) / 资金费率。
 - **交易所**：四个复选框（Binance/OKX/Bybit/Gate），可多选叠加对比。
 - **开始/结束时间**：选日期区间，点「查询」看折线 + 区间涨跌汇总表（首值/末值/涨跌幅）。
+
+---
+
+## 排错（常见报错）
+
+### 报错：`请求失败：Unexpected token '<', "<!DOCTYPE" is not valid JSON`
+含义：前端 `fetch('/api/query')` 期望 JSON，却拿到了 HTML（`<!DOCTYPE` 开头）。
+**根因 99% 是 D1 没绑上 / 绑了没重部署**，导致后端 `env.DB` 为 `undefined`，D1 操作抛异常被 Cloudflare 包成 HTML 错误页。
+
+按此顺序排查：
+1. **变量名必须叫 `DB`**：Settings → Bindings → D1 database 的 Variable name 是不是 `DB`（区分大小写），不是就改。
+2. **绑完必须重部署**：上传文件部署的 Worker，在 Settings 加完绑定后，回 **Deployments → Redeploy** 点一次，绑定才会进入线上代码。这是本报错最常见原因。
+3. 重部署后访问一次 `/api/ingest`（自动建表）。再去面板查询，应正常返回折线。
+
+> 现在代码已做防护：D1 缺失/`query` 异常时统一返回 **JSON 错误**（含中文提示），不再吐 HTML；前端也会把错误原文显示出来，方便定位。若仍看到 `<!DOCTYPE`，说明请求根本没打到本 Worker（路由/域名问题），检查子域是否正确。
+
+### 面板能打开但查询无数据
+- 还没触发过采集：访问 `/api/ingest` 一次（或等 Cron 跑）。
+- 采集失败看 `/api/health` 是否 `ok:true`；具体采集情况看 Worker → Logs（需开启）。
+- Binance 对美区 IP 返回 451 属正常，代码已降级只记另三家。
+

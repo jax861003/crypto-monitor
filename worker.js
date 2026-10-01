@@ -458,8 +458,18 @@ function serveDashboard() {
     let data;
     try {
       const res = await fetch('/api/query?'+params.toString());
+      if (!res.ok) {
+        const txt = await res.text();
+        status.textContent = '请求失败：HTTP ' + res.status + ' ' + (txt || '').slice(0, 160);
+        btn.disabled = false; return;
+      }
       data = await res.json();
     } catch(e) { status.textContent='请求失败：'+e.message; btn.disabled=false; return; }
+
+    if (data && data.ok === false) {
+      status.textContent = '查询失败：' + (data.error || '未知错误');
+      btn.disabled = false; return;
+    }
 
     const rows = data.rows || [];
     status.textContent = '命中 '+rows.length+' 条（上限 5000，超出请缩窄区间）。'+(rows.length>=5000?' ⚠️ 已截断':'');
@@ -535,10 +545,15 @@ function serveDashboard() {
 // 入口
 // ============================================================
 async function runIngest(env) {
-  const rows = await collectAll(getWatchlist(env));
-  const n = await insertSnapshots(env.DB, rows);
-  console.log(`[ingest] collected=${rows.length} inserted=${n}`);
-  return n;
+  try {
+    const rows = await collectAll(getWatchlist(env));
+    const n = await insertSnapshots(env.DB, rows);
+    console.log(`[ingest] collected=${rows.length} inserted=${n}`);
+    return n;
+  } catch (e) {
+    console.error('[ingest] failed:', e && e.message ? e.message : e);
+    return 0;
+  }
 }
 
 function numOrNull(v) {
@@ -546,38 +561,76 @@ function numOrNull(v) {
 }
 
 async function handleQuery(request, env) {
-  const url = new URL(request.url);
-  const params = {
-    from: numOrNull(url.searchParams.get('from')),
-    to: numOrNull(url.searchParams.get('to')),
-    exchange: (url.searchParams.get('exchange') || '').trim(),
-    symbol: (url.searchParams.get('symbol') || '').trim().toUpperCase(),
-    metric: url.searchParams.get('metric') || 'price',
-  };
-  const data = await querySnapshots(env.DB, params);
-  return Response.json(data);
+  if (!env.DB) {
+    return Response.json(
+      {
+        ok: false,
+        error:
+          'D1 尚未绑定或未生效：请在 Worker → Settings → Bindings 添加「变量名 DB」的 D1 数据库绑定，并重新部署一次后再查询。',
+      },
+      { status: 200 }
+    );
+  }
+  try {
+    const url = new URL(request.url);
+    const params = {
+      from: numOrNull(url.searchParams.get('from')),
+      to: numOrNull(url.searchParams.get('to')),
+      exchange: (url.searchParams.get('exchange') || '').trim(),
+      symbol: (url.searchParams.get('symbol') || '').trim().toUpperCase(),
+      metric: url.searchParams.get('metric') || 'price',
+    };
+    const data = await querySnapshots(env.DB, params);
+    return Response.json({ ok: true, ...data });
+  } catch (e) {
+    return Response.json(
+      { ok: false, error: '查询异常：' + (e && e.message ? e.message : String(e)) },
+      { status: 200 }
+    );
+  }
 }
 
 export default {
   async fetch(request, env, ctx) {
-    const url = new URL(request.url);
-    const path = url.pathname;
+    try {
+      const url = new URL(request.url);
+      const path = url.pathname;
 
-    if (path === '/api/query') return handleQuery(request, env);
-    if (path === '/api/config') {
-      return Response.json({
-        watchlist: getWatchlist(env),
-        exchanges: EXCHANGES,
-        metrics: METRICS,
-      });
+      if (path === '/api/query') return handleQuery(request, env);
+      if (path === '/api/config') {
+        return Response.json({
+          watchlist: getWatchlist(env),
+          exchanges: EXCHANGES,
+          metrics: METRICS,
+        });
+      }
+      if (path === '/api/health') return Response.json({ ok: true, ts: Date.now() });
+      if (path === '/api/ingest') {
+        if (!env.DB) {
+          return Response.json(
+            {
+              ok: false,
+              error:
+                'D1 尚未绑定或未生效：请在 Worker → Settings → Bindings 添加「变量名 DB」的 D1 数据库绑定，并重新部署一次后再触发采集。',
+            },
+            { status: 200 }
+          );
+        }
+        // 手动触发一次采集（初始化 D1 建表也走这里）。免费额度下也可用此代替 Cron。
+        ctx.waitUntil(runIngest(env));
+        return Response.json({ ok: true, msg: 'ingest scheduled' });
+      }
+      return serveDashboard();
+    } catch (e) {
+      // 任何未捕获异常都返回 JSON，避免前端拿到 HTML(<!DOCTYPE) 报错
+      return new Response(
+        JSON.stringify({
+          ok: false,
+          error: '服务器异常：' + (e && e.message ? e.message : String(e)),
+        }),
+        { status: 200, headers: { 'content-type': 'application/json; charset=utf-8' } }
+      );
     }
-    if (path === '/api/health') return Response.json({ ok: true, ts: Date.now() });
-    if (path === '/api/ingest') {
-      // 手动触发一次采集（初始化 D1 建表也走这里）。免费额度下也可用此代替 Cron。
-      ctx.waitUntil(runIngest(env));
-      return Response.json({ ok: true, msg: 'ingest scheduled' });
-    }
-    return serveDashboard();
   },
 
   // 定时采集（需在此 Worker 的 Dashboard → Triggers 手动添加 Cron 触发，例如 */15 * * * *）
