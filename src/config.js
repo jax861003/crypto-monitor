@@ -12,9 +12,13 @@ const DEFAULT_WATCHLIST = [
 
 // 数据源：OKX / Bybit / Gate.io（Binance 已按需求移除——它对 Cloudflare 边缘 IP 地理封锁不友好）
 export const EXCHANGES = ['okx', 'bybit', 'gate'];
+// 指标 = 三家交易所公开 API 全部可取的行情/合约指标（不含需付费的链上净流）
 export const METRICS = [
-  { key: 'price', label: '价格' },
-  { key: 'volume_24h', label: '24h 成交量' },
+  { key: 'price', label: '最新价' },
+  { key: 'change_pct', label: '24h 涨跌幅(%)' },
+  { key: 'high_24h', label: '24h 最高价' },
+  { key: 'low_24h', label: '24h 最低价' },
+  { key: 'volume_24h', label: '24h 成交额(USDT)' },
   { key: 'open_interest', label: '合约持仓量(OI)' },
   { key: 'funding_rate', label: '资金费率' },
 ];

@@ -26,6 +26,12 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// 24h 涨跌幅（%）：优先用交易所自带字段，缺 open24h 时由 last/open 计算
+function pctChange(last, open) {
+  if (last == null || open == null || open === 0) return null;
+  return ((last - open) / open) * 100;
+}
+
 // ---------- OKX ----------
 async function collectOkx(watch) {
   const syms = [...watch].filter((s) => s.endsWith('USDT'));
@@ -40,6 +46,9 @@ async function collectOkx(watch) {
       exchange: 'okx',
       symbol: sym,
       price: num(t.last),
+      high_24h: num(t.high24h),
+      low_24h: num(t.low24h),
+      change_pct: pctChange(num(t.last), num(t.open24h)),
       volume_24h: num(t.volCcy24h) != null ? num(t.volCcy24h) : num(t.vol24h), // 优先 USDT 计价量
       open_interest: null,
       funding_rate: null,
@@ -79,7 +88,10 @@ async function collectBybit(watch) {
           exchange: 'bybit',
           symbol: s,
           price: num(t.lastPrice),
-          volume_24h: num(t.volume24h),
+          high_24h: num(t.highPrice24h),
+          low_24h: num(t.lowPrice24h),
+          change_pct: num(t.price24hPcnt) != null ? num(t.price24hPcnt) * 100 : null, // Bybit 给的是小数
+          volume_24h: num(t.turnover24h), // USDT 计价成交额，与 OKX/Gate 口径对齐
           open_interest: null,
           funding_rate: t.fundingRate != null ? num(t.fundingRate) : null,
         };
@@ -116,7 +128,10 @@ async function collectGate(watch) {
           exchange: 'gate',
           symbol: s,
           price: num(x.last),
-          volume_24h: num(x.quote_volume),
+          high_24h: num(x.high_24h),
+          low_24h: num(x.low_24h),
+          change_pct: num(x.change_percentage), // Gate 直接给百分比
+          volume_24h: num(x.quote_volume), // USDT 计价
           open_interest: null,
           funding_rate: null,
         };

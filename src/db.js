@@ -11,6 +11,9 @@ const STMT_TABLE = `CREATE TABLE IF NOT EXISTS market_snapshot (
   exchange         TEXT    NOT NULL,
   symbol           TEXT    NOT NULL,
   price            REAL,
+  high_24h         REAL,
+  low_24h          REAL,
+  change_pct       REAL,
   volume_24h       REAL,
   open_interest    REAL,
   funding_rate     REAL,
@@ -20,17 +23,30 @@ const STMT_TABLE = `CREATE TABLE IF NOT EXISTS market_snapshot (
 const STMT_IDX_1 = `CREATE INDEX IF NOT EXISTS idx_snap_ts ON market_snapshot(ts)`;
 const STMT_IDX_2 = `CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbol, ts)`;
 
+// 旧库自动补列（幂等：列已存在时报错被吞掉）
+const MIGRATIONS = [
+  'ALTER TABLE market_snapshot ADD COLUMN high_24h REAL',
+  'ALTER TABLE market_snapshot ADD COLUMN low_24h REAL',
+  'ALTER TABLE market_snapshot ADD COLUMN change_pct REAL',
+];
+
 const schemaReadySet = new WeakSet();
 export async function ensureSchema(db) {
   if (schemaReadySet.has(db)) return;
   await db.prepare(STMT_TABLE).run();
   await db.prepare(STMT_IDX_1).run();
   await db.prepare(STMT_IDX_2).run();
+  for (const m of MIGRATIONS) {
+    try {
+      await db.prepare(m).run();
+    } catch {} // duplicate column / 旧库已迁移 → 忽略
+  }
   schemaReadySet.add(db);
 }
 
-const COLS = '(ts, exchange, symbol, price, volume_24h, open_interest, funding_rate, taker_buy_volume)';
-const SQL = `INSERT INTO market_snapshot ${COLS} VALUES (?,?,?,?,?,?,?,?)`;
+const COLS =
+  '(ts, exchange, symbol, price, high_24h, low_24h, change_pct, volume_24h, open_interest, funding_rate, taker_buy_volume)';
+const SQL = `INSERT INTO market_snapshot ${COLS} VALUES (?,?,?,?,?,?,?,?,?,?,?)`;
 
 // 批量写入，自动按 100 条切分（D1 batch 单次上限 100 条语句）
 export async function insertSnapshots(db, rows) {
@@ -49,6 +65,9 @@ export async function insertSnapshots(db, rows) {
           r.exchange,
           r.symbol,
           r.price ?? null,
+          r.high_24h ?? null,
+          r.low_24h ?? null,
+          r.change_pct ?? null,
           r.volume_24h ?? null,
           r.open_interest ?? null,
           r.funding_rate ?? null,
@@ -83,7 +102,7 @@ export async function querySnapshots(db, params) {
     args.push(params.symbol);
   }
   const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  const sql = `SELECT ts, exchange, symbol, price, volume_24h, open_interest, funding_rate FROM market_snapshot ${w} ORDER BY ts ASC LIMIT 5000`;
+  const sql = `SELECT ts, exchange, symbol, price, high_24h, low_24h, change_pct, volume_24h, open_interest, funding_rate FROM market_snapshot ${w} ORDER BY ts ASC LIMIT 5000`;
 
   const { results } = await db.prepare(sql).bind(...args).all();
   return { metric: params.metric, count: results.length, rows: results };

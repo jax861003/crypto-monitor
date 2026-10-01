@@ -7,7 +7,7 @@
 //   3. 点 Deploy
 //   4. 部署后在 Dashboard → Settings 绑定 D1（变量名必须 DB）+ 添加 WATCHLIST 变量
 //   5. 回 Triggers 标签手动加一个 Cron（例如 */15 * * * *）实现自动采集
-// D1 绑上后，首次访问 /api/ingest 会自动建表初始化，无需手动执行 SQL。
+// D1 绑上后，首次访问 /api/ingest 会自动建表初始化（含旧库自动补列迁移），无需手动执行 SQL。
 // ============================================================
 
 // -------- 配置区（占位默认值；部署后用 Dashboard 变量 WATCHLIST 覆盖）--------
@@ -24,12 +24,17 @@ const DEFAULT_WATCHLIST = [
 ];
 
 const EXCHANGES = ['okx', 'bybit', 'gate'];
+// 指标 = 三家交易所公开 API 全部可取的行情/合约指标（不含需付费的链上净流）
 const METRICS = [
-  { key: 'price', label: '价格' },
-  { key: 'volume_24h', label: '24h 成交量' },
+  { key: 'price', label: '最新价' },
+  { key: 'change_pct', label: '24h 涨跌幅(%)' },
+  { key: 'high_24h', label: '24h 最高价' },
+  { key: 'low_24h', label: '24h 最低价' },
+  { key: 'volume_24h', label: '24h 成交额(USDT)' },
   { key: 'open_interest', label: '合约持仓量(OI)' },
   { key: 'funding_rate', label: '资金费率' },
 ];
+const METRIC_KEYS = METRICS.map((m) => m.key);
 
 // 观察池：优先用环境变量 WATCHLIST（大小写不限），否则用上方默认占位值。
 function getWatchlist(env) {
@@ -45,7 +50,7 @@ function getWatchlist(env) {
 }
 
 // ============================================================
-// 四家交易所公开 REST API 采集 + 归一化（免费额度友好）
+// 交易所公开 REST API 采集 + 归一化（免费额度友好）
 // 仅支持 USDT 本位：<币种>USDT
 // ============================================================
 
@@ -74,11 +79,17 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// 24h 涨跌幅（%）：优先用交易所自带字段，缺 open24h 时由 last/open 计算
+function pctChange(last, open) {
+  if (last == null || open == null || open === 0) return null;
+  return ((last - open) / open) * 100;
+}
+
 // ---------- 采集策略说明 ----------
 // 数据源：OKX / Bybit / Gate.io（Binance 已按需求移除——它对 Cloudflare 边缘 IP 地理封锁不友好）。
 // 免费版 Worker 单次调用 CPU 仅 10ms：拉全市场大 JSON（如 Bybit 全 ticker ≈ 1MB+），
 // 光 JSON.parse 就会超限，后台任务被静默掐死，D1 一条都写不进。
-// 因此 OKX/Gate 用 bulk 接口（响应适中），Bybit 按观察池逐个小请求，控制总子请求数在免费版 50 上限内。
+// 因此 OKX/Gate 用单对或 bulk 中等响应接口，Bybit 按观察池逐个小请求，控制总子请求数在免费版 50 上限内。
 // 7 币 ≈ 37 个子请求（OKX 9 + Bybit 14 + Gate 14）；观察池超过 ~10 个币会撞上限。
 
 // ---------- OKX ----------
@@ -91,10 +102,15 @@ async function collectOkx(watch) {
   for (const t of (r && r.data) || []) {
     const sym = String(t.instId).replace(/-USDT$/, '') + 'USDT';
     if (!watch.has(sym)) continue;
+    const last = num(t.last);
+    const open24 = num(t.open24h);
     map[sym] = {
       exchange: 'okx',
       symbol: sym,
-      price: num(t.last),
+      price: last,
+      high_24h: num(t.high24h),
+      low_24h: num(t.low24h),
+      change_pct: pctChange(last, open24),
       volume_24h: num(t.volCcy24h) != null ? num(t.volCcy24h) : num(t.vol24h), // 优先 USDT 计价量
       open_interest: null,
       funding_rate: null,
@@ -134,7 +150,10 @@ async function collectBybit(watch) {
           exchange: 'bybit',
           symbol: s,
           price: num(t.lastPrice),
-          volume_24h: num(t.volume24h),
+          high_24h: num(t.highPrice24h),
+          low_24h: num(t.lowPrice24h),
+          change_pct: num(t.price24hPcnt) != null ? num(t.price24hPcnt) * 100 : null, // Bybit 给的是小数
+          volume_24h: num(t.turnover24h), // USDT 计价成交额，与 OKX/Gate 口径对齐
           open_interest: null,
           funding_rate: t.fundingRate != null ? num(t.fundingRate) : null,
         };
@@ -171,7 +190,10 @@ async function collectGate(watch) {
           exchange: 'gate',
           symbol: s,
           price: num(x.last),
-          volume_24h: num(x.quote_volume),
+          high_24h: num(x.high_24h),
+          low_24h: num(x.low_24h),
+          change_pct: num(x.change_percentage), // Gate 直接给百分比
+          volume_24h: num(x.quote_volume), // USDT 计价
           open_interest: null,
           funding_rate: null,
         };
@@ -186,7 +208,7 @@ async function collectGate(watch) {
   return Object.values(map);
 }
 
-// 并行采集四家，单家失败不影响其他家；返回 { rows, detail }（detail 供 /api/ingest 直接返回给浏览器排障）
+// 并行采集，单家失败不影响其他家；返回 { rows, detail }（detail 供 /api/ingest 直接返回给浏览器排障）
 const EXCHANGE_FNS = [
   ['okx', collectOkx],
   ['bybit', collectBybit],
@@ -229,6 +251,9 @@ const STMT_TABLE = `CREATE TABLE IF NOT EXISTS market_snapshot (
   exchange         TEXT    NOT NULL,
   symbol           TEXT    NOT NULL,
   price            REAL,
+  high_24h         REAL,
+  low_24h          REAL,
+  change_pct       REAL,
   volume_24h       REAL,
   open_interest    REAL,
   funding_rate     REAL,
@@ -238,17 +263,30 @@ const STMT_TABLE = `CREATE TABLE IF NOT EXISTS market_snapshot (
 const STMT_IDX_1 = `CREATE INDEX IF NOT EXISTS idx_snap_ts ON market_snapshot(ts)`;
 const STMT_IDX_2 = `CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbol, ts)`;
 
+// 旧库自动补列（幂等：列已存在时报错被吞掉）
+const MIGRATIONS = [
+  'ALTER TABLE market_snapshot ADD COLUMN high_24h REAL',
+  'ALTER TABLE market_snapshot ADD COLUMN low_24h REAL',
+  'ALTER TABLE market_snapshot ADD COLUMN change_pct REAL',
+];
+
 let schemaReadySet = new WeakSet();
 async function ensureSchema(db) {
   if (schemaReadySet.has(db)) return;
   await db.prepare(STMT_TABLE).run();
   await db.prepare(STMT_IDX_1).run();
   await db.prepare(STMT_IDX_2).run();
+  for (const m of MIGRATIONS) {
+    try {
+      await db.prepare(m).run();
+    } catch {} // duplicate column / 旧库已迁移 → 忽略
+  }
   schemaReadySet.add(db);
 }
 
-const COLS = '(ts, exchange, symbol, price, volume_24h, open_interest, funding_rate, taker_buy_volume)';
-const SQL = `INSERT INTO market_snapshot ${COLS} VALUES (?,?,?,?,?,?,?,?)`;
+const COLS =
+  '(ts, exchange, symbol, price, high_24h, low_24h, change_pct, volume_24h, open_interest, funding_rate, taker_buy_volume)';
+const SQL = `INSERT INTO market_snapshot ${COLS} VALUES (?,?,?,?,?,?,?,?,?,?,?)`;
 
 // 批量写入，自动按 100 条切分（D1 batch 单次上限 100 条语句）
 async function insertSnapshots(db, rows) {
@@ -267,6 +305,9 @@ async function insertSnapshots(db, rows) {
           r.exchange,
           r.symbol,
           r.price ?? null,
+          r.high_24h ?? null,
+          r.low_24h ?? null,
+          r.change_pct ?? null,
           r.volume_24h ?? null,
           r.open_interest ?? null,
           r.funding_rate ?? null,
@@ -282,6 +323,7 @@ async function insertSnapshots(db, rows) {
 // 按日期区间 / 交易所 / 币种查询（面板主路径）
 async function querySnapshots(db, params) {
   await ensureSchema(db);
+  if (!METRIC_KEYS.includes(params.metric)) params.metric = 'price';
   const where = [];
   const args = [];
   if (params.from != null) {
@@ -301,7 +343,7 @@ async function querySnapshots(db, params) {
     args.push(params.symbol);
   }
   const w = where.length ? 'WHERE ' + where.join(' AND ') : '';
-  const sql = `SELECT ts, exchange, symbol, price, volume_24h, open_interest, funding_rate FROM market_snapshot ${w} ORDER BY ts ASC LIMIT 5000`;
+  const sql = `SELECT ts, exchange, symbol, price, high_24h, low_24h, change_pct, volume_24h, open_interest, funding_rate FROM market_snapshot ${w} ORDER BY ts ASC LIMIT 5000`;
 
   const { results } = await db.prepare(sql).bind(...args).all();
   return { metric: params.metric, count: results.length, rows: results };
@@ -327,48 +369,75 @@ async function debugStats(db) {
 
 // ============================================================
 // 面板（内联 HTML，单 Worker 直接托管，无需静态资源绑定）
+// 版式按 1920×1080 主屏优化：1680px 宽幅 + 大字号 + 大图区；支持黑夜/白天主题切换（记忆偏好）
 // ============================================================
 function serveDashboard() {
   const html = `<!doctype html>
-<html lang="zh-CN">
+<html lang="zh-CN" data-theme="dark">
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>加密货币资金面监控面板</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
 <style>
-  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --txt:#e6e9ef; --muted:#8b93a7; --accent:#4f9dff; }
+  :root, html[data-theme="dark"] {
+    --bg:#0f1115; --card:#171a21; --line:#262b36; --input:#0c0e12;
+    --txt:#e6e9ef; --muted:#8b93a7; --accent:#4f9dff; --accent-txt:#fff;
+    --up:#26a69a; --down:#ef5350; --shadow:0 2px 12px rgba(0,0,0,.35);
+  }
+  html[data-theme="light"] {
+    --bg:#f4f6fa; --card:#ffffff; --line:#e2e7f0; --input:#eef1f7;
+    --txt:#1c2330; --muted:#5a6478; --accent:#2563eb; --accent-txt:#fff;
+    --up:#0f9d84; --down:#e5484d; --shadow:0 2px 12px rgba(30,40,60,.08);
+  }
   * { box-sizing: border-box; }
-  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.5 -apple-system,Segoe UI,Roboto,Helvetica,Arial,sans-serif; }
-  header { padding:18px 22px; border-bottom:1px solid var(--line); display:flex; align-items:baseline; gap:12px; flex-wrap:wrap; }
-  header h1 { font-size:18px; margin:0; }
-  header .sub { color:var(--muted); font-size:12px; }
-  .wrap { padding:18px 22px; max-width:1180px; margin:0 auto; }
-  .controls { display:flex; flex-wrap:wrap; gap:14px; background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; align-items:flex-end; }
-  .field { display:flex; flex-direction:column; gap:6px; }
-  .field label { font-size:12px; color:var(--muted); }
-  select, input { background:#0c0e12; color:var(--txt); border:1px solid var(--line); border-radius:8px; padding:8px 10px; font-size:13px; }
-  .checks { display:flex; gap:12px; flex-wrap:wrap; }
-  .checks label { display:flex; gap:6px; align-items:center; color:var(--txt); font-size:13px; }
-  button { background:var(--accent); color:#fff; border:0; border-radius:8px; padding:9px 18px; font-size:13px; cursor:pointer; }
+  body { margin:0; background:var(--bg); color:var(--txt);
+         font:15px/1.55 -apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         transition: background .25s ease, color .25s ease; }
+  header { padding:20px 32px; border-bottom:1px solid var(--line); display:flex;
+           align-items:center; gap:16px; flex-wrap:wrap; background:var(--card); }
+  header h1 { font-size:22px; margin:0; letter-spacing:.5px; }
+  header .sub { color:var(--muted); font-size:13px; flex:1; }
+  .wrap { padding:24px 32px; max-width:1680px; margin:0 auto; }
+  .controls { display:flex; flex-wrap:wrap; gap:20px; background:var(--card);
+              border:1px solid var(--line); border-radius:14px; padding:20px 24px;
+              align-items:flex-end; box-shadow:var(--shadow); }
+  .field { display:flex; flex-direction:column; gap:7px; }
+  .field label { font-size:13px; color:var(--muted); font-weight:500; }
+  select, input { background:var(--input); color:var(--txt); border:1px solid var(--line);
+                  border-radius:9px; padding:10px 12px; font-size:14px; min-width:190px; }
+  select:focus, input:focus { outline:none; border-color:var(--accent); }
+  .checks { display:flex; gap:16px; flex-wrap:wrap; padding:10px 0 8px; }
+  .checks label { display:flex; gap:7px; align-items:center; color:var(--txt); font-size:14px; cursor:pointer; }
+  .checks input { min-width:0; width:16px; height:16px; accent-color:var(--accent); cursor:pointer; }
+  button { background:var(--accent); color:var(--accent-txt); border:0; border-radius:9px;
+           padding:11px 26px; font-size:15px; cursor:pointer; font-weight:600; }
   button:disabled { opacity:.5; cursor:default; }
-  .card { background:var(--card); border:1px solid var(--line); border-radius:12px; padding:16px; margin-top:16px; }
-  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(180px,1fr)); gap:12px; margin-top:14px; }
-  .stat { background:#0c0e12; border:1px solid var(--line); border-radius:10px; padding:12px; }
-  .stat .k { color:var(--muted); font-size:12px; }
-  .stat .v { font-size:18px; margin-top:4px; }
-  .up { color:#26a69a; } .down { color:#ef5350; }
-  table { width:100%; border-collapse:collapse; margin-top:14px; font-size:13px; }
-  th, td { text-align:left; padding:9px 10px; border-bottom:1px solid var(--line); }
-  th { color:var(--muted); font-weight:500; }
-  .hint { color:var(--muted); font-size:12px; margin-top:8px; }
-  #status { color:var(--muted); font-size:12px; margin-top:10px; min-height:16px; }
+  button.ghost { background:transparent; color:var(--txt); border:1px solid var(--line);
+                 font-weight:400; padding:8px 16px; font-size:13px; }
+  button.ghost:hover { border-color:var(--accent); color:var(--accent); }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px;
+          padding:20px 24px; margin-top:20px; box-shadow:var(--shadow); }
+  .card h2 { margin:0 0 6px; font-size:16px; color:var(--muted); font-weight:500; }
+  .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(240px,1fr)); gap:16px; margin-top:16px; }
+  .stat { background:var(--input); border:1px solid var(--line); border-radius:12px; padding:16px 18px; }
+  .stat .k { color:var(--muted); font-size:13px; }
+  .stat .v { font-size:24px; margin-top:6px; font-weight:600; }
+  .up { color:var(--up); } .down { color:var(--down); }
+  table { width:100%; border-collapse:collapse; margin-top:18px; font-size:14px; }
+  th, td { text-align:left; padding:11px 14px; border-bottom:1px solid var(--line); }
+  th { color:var(--muted); font-weight:500; font-size:13px; }
+  tr:hover td { background:var(--input); }
+  .hint { color:var(--muted); font-size:13px; margin-top:10px; }
+  #status { color:var(--muted); font-size:13px; margin-top:12px; min-height:18px; }
+  @media (max-width: 900px) { .wrap { padding:16px; } select, input { min-width:150px; } }
 </style>
 </head>
 <body>
 <header>
   <h1>加密货币资金面监控面板</h1>
   <span class="sub">OKX · Bybit · Gate.io ｜ 数据存于 Cloudflare D1</span>
+  <button id="themeBtn" class="ghost" title="切换黑夜/白天模式">☀️ 白天模式</button>
 </header>
 <div class="wrap">
   <div class="controls">
@@ -392,16 +461,18 @@ function serveDashboard() {
       <label>交易所</label>
       <div class="checks" id="exchecks"></div>
     </div>
-    <button id="run">查询</button>
+    <button id="run">查 询</button>
   </div>
   <div id="status"></div>
 
   <div class="card">
-    <canvas id="chart" height="120"></canvas>
+    <h2>指标走势</h2>
+    <canvas id="chart" height="150"></canvas>
     <div class="hint">折线展示所选币种在指定时间区间内、各交易所的指标走势；鼠标悬停看数值。</div>
   </div>
 
   <div class="card">
+    <h2>区间汇总</h2>
     <div class="grid" id="stats"></div>
     <table id="tbl">
       <thead><tr><th>交易所</th><th>首值</th><th>末值</th><th>区间涨跌</th><th>数据点</th></tr></thead>
@@ -413,13 +484,30 @@ function serveDashboard() {
 <script>
   const EXCHANGES = ${JSON.stringify(EXCHANGES)};
   const METRICS = ${JSON.stringify(METRICS)};
-  const COLORS = { okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
+  const EX_LABELS = { okx:'OKX', bybit:'Bybit', gate:'Gate.io' };
+  const EX_COLORS = { okx:'#4f9dff', bybit:'#ff7a45', gate:'#2bbf6a' };
+  const THEMES = {
+    dark:  { tick:'#8b93a7', grid:'#262b36', legend:'#e6e9ef' },
+    light: { tick:'#5a6478', grid:'#e2e7f0', legend:'#1c2330' },
+  };
+
+  // ---- 主题切换（记忆到 localStorage）----
+  const themeBtn = document.getElementById('themeBtn');
+  function curTheme(){ return document.documentElement.dataset.theme === 'light' ? 'light' : 'dark'; }
+  function applyTheme(t, save) {
+    document.documentElement.dataset.theme = t;
+    themeBtn.textContent = t === 'dark' ? '☀️ 白天模式' : '🌙 黑夜模式';
+    if (save) { try { localStorage.setItem('cm-theme', t); } catch(e){} }
+    redraw();
+  }
+  themeBtn.addEventListener('click', () => applyTheme(curTheme() === 'dark' ? 'light' : 'dark', true));
+  try { applyTheme(localStorage.getItem('cm-theme') || 'dark', false); } catch(e){ redraw(); }
 
   const symSel = document.getElementById('symbol');
   const metSel = document.getElementById('metric');
   METRICS.forEach(m => { const o=document.createElement('option'); o.value=m.key; o.textContent=m.label; metSel.appendChild(o); });
   const exBox = document.getElementById('exchecks');
-  EXCHANGES.forEach(e => { const l=document.createElement('label'); l.innerHTML='<input type="checkbox" value="'+e+'" checked>'+e; exBox.appendChild(l); });
+  EXCHANGES.forEach(e => { const l=document.createElement('label'); l.innerHTML='<input type="checkbox" value="'+e+'" checked>'+EX_LABELS[e]; exBox.appendChild(l); });
 
   // 观察池来自 /api/config（= 部署时环境变量 WATCHLIST，缺省用内置默认）
   let WATCHLIST = ['BTCUSDT'];
@@ -444,7 +532,10 @@ function serveDashboard() {
   document.getElementById('from').value = fmt(weekAgo);
 
   let chart;
+  let lastQuery = null; // { rows, exs, metric } —— 主题切换后重绘用
   document.getElementById('run').addEventListener('click', run);
+
+  function metricLabel(key){ const m = METRICS.find(x=>x.key===key); return m ? m.label : key; }
 
   async function run() {
     const btn = document.getElementById('run'); btn.disabled = true;
@@ -476,22 +567,30 @@ function serveDashboard() {
 
     const rows = data.rows || [];
     status.textContent = '命中 '+rows.length+' 条（上限 5000，超出请缩窄区间）。'+(rows.length>=5000?' ⚠️ 已截断':'');
+    lastQuery = { rows, exs, metric };
     drawChart(rows, exs, metric);
     drawStats(rows, exs, metric);
     btn.disabled = false;
   }
 
+  // 主题切换时用上次查询结果重绘（换配色不丢图）
+  function redraw() {
+    if (!lastQuery) return;
+    drawChart(lastQuery.rows, lastQuery.exs, lastQuery.metric);
+  }
+
   function valOf(r, metric){ return r[metric]; }
 
   function drawChart(rows, exs, metric) {
+    const th = THEMES[curTheme()];
     const byEx = {};
     exs.forEach(e => byEx[e] = []);
     rows.forEach(r => { if (byEx[r.exchange]) byEx[r.exchange].push({ x: r.ts, y: valOf(r, metric) }); });
     const datasets = exs.map(e => ({
-      label: e,
+      label: EX_LABELS[e] || e,
       data: byEx[e],
-      borderColor: COLORS[e] || '#999',
-      backgroundColor: (COLORS[e] || '#999') + '33',
+      borderColor: EX_COLORS[e] || '#999',
+      backgroundColor: (EX_COLORS[e] || '#999') + '33',
       pointRadius: 0,
       borderWidth: 2,
       spanGaps: true,
@@ -505,10 +604,10 @@ function serveDashboard() {
         animation: false,
         interaction: { mode:'nearest', intersect:false },
         scales: {
-          x: { type:'linear', ticks:{ color:'#8b93a7', callback:v=>new Date(v).toLocaleString() }, grid:{ color:'#262b36' } },
-          y: { ticks:{ color:'#8b93a7' }, grid:{ color:'#262b36' } }
+          x: { type:'linear', ticks:{ color:th.tick, maxTicksLimit:12, callback:v=>new Date(v).toLocaleString() }, grid:{ color:th.grid } },
+          y: { ticks:{ color:th.tick }, grid:{ color:th.grid } }
         },
-        plugins: { legend:{ labels:{ color:'#e6e9ef' } } }
+        plugins: { legend:{ labels:{ color:th.legend, boxWidth:18 } } }
       }
     });
   }
@@ -521,18 +620,18 @@ function serveDashboard() {
       if (!pts.length) return;
       pts.sort((a,b)=>a.ts-b.ts);
       const first = pts[0].v, last = pts[pts.length-1].v;
-      const pct = first ? ((last-first)/first*100) : 0;
+      const pct = first ? ((last-first)/Math.abs(first)*100) : 0;
       const cls = pct>=0 ? 'up' : 'down';
       const arrow = pct>=0 ? '▲' : '▼';
       const stat = document.createElement('div'); stat.className='stat';
-      stat.innerHTML = '<div class="k">'+e+' ｜ '+metric+'</div><div class="v '+cls+'">'+arrow+' '+pct.toFixed(2)+'%</div>';
+      stat.innerHTML = '<div class="k">'+(EX_LABELS[e]||e)+' ｜ '+metricLabel(metric)+'</div><div class="v '+cls+'">'+arrow+' '+pct.toFixed(2)+'%</div>';
       statsEl.appendChild(stat);
       const tr = document.createElement('tr');
-      tr.innerHTML = '<td>'+e+'</td><td>'+fmtNum(first)+'</td><td>'+fmtNum(last)+'</td><td class="'+cls+'">'+arrow+' '+pct.toFixed(2)+'%</td><td>'+pts.length+'</td>';
+      tr.innerHTML = '<td>'+(EX_LABELS[e]||e)+'</td><td>'+fmtNum(first)+'</td><td>'+fmtNum(last)+'</td><td class="'+cls+'">'+arrow+' '+pct.toFixed(2)+'%</td><td>'+pts.length+'</td>';
       tbody.appendChild(tr);
     });
   }
-  function fmtNum(n){ if(n==null) return '—'; if(Math.abs(n)>=1e6) return (n/1e6).toFixed(2)+'M'; if(Math.abs(n)>=1e3) return (n/1e3).toFixed(2)+'K'; return n.toFixed(n<1?6:2); }
+  function fmtNum(n){ if(n==null) return '—'; if(Math.abs(n)>=1e9) return (n/1e9).toFixed(2)+'B'; if(Math.abs(n)>=1e6) return (n/1e6).toFixed(2)+'M'; if(Math.abs(n)>=1e3) return (n/1e3).toFixed(2)+'K'; return n.toFixed(Math.abs(n)<1?6:2); }
 
   run();
 </script>
@@ -561,7 +660,7 @@ async function runIngest(env) {
 }
 
 function numOrNull(v) {
-  return v && /^\d+$/.test(v) ? Number(v) : null;
+  return v && /^-?\d+$/.test(v) ? Number(v) : null;
 }
 
 async function handleQuery(request, env) {
@@ -584,6 +683,7 @@ async function handleQuery(request, env) {
       symbol: (url.searchParams.get('symbol') || '').trim().toUpperCase(),
       metric: url.searchParams.get('metric') || 'price',
     };
+    if (!METRIC_KEYS.includes(params.metric)) params.metric = 'price';
     const data = await querySnapshots(env.DB, params);
     return Response.json({ ok: true, ...data });
   } catch (e) {
