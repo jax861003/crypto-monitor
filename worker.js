@@ -247,25 +247,30 @@ async function collectAll(watchlist) {
 // ============================================================
 
 // 自动建表（首次写入/查询前调用，幂等）。D1 绑定后访问 /api/ingest 即自动初始化。
-const SCHEMA_SQL = `
-CREATE TABLE IF NOT EXISTS market_snapshot (
-  id            INTEGER PRIMARY KEY AUTOINCREMENT,
-  ts            INTEGER NOT NULL,
-  exchange      TEXT    NOT NULL,
-  symbol        TEXT    NOT NULL,
-  price         REAL,
-  volume_24h    REAL,
-  open_interest REAL,
-  funding_rate  REAL,
+// 注意：不用 db.exec(多语句)——D1 的 exec 会把多行 SQL 切碎导致 "incomplete input"。
+// 改用 prepare().run() 逐条执行，并用隔离级标志缓存，避免每次查询都跑建表。
+const STMT_TABLE = `CREATE TABLE IF NOT EXISTS market_snapshot (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  ts               INTEGER NOT NULL,
+  exchange         TEXT    NOT NULL,
+  symbol           TEXT    NOT NULL,
+  price            REAL,
+  volume_24h       REAL,
+  open_interest    REAL,
+  funding_rate     REAL,
   taker_buy_volume REAL,
-  created_at    INTEGER DEFAULT (strftime('%s','now'))
-);
-CREATE INDEX IF NOT EXISTS idx_snap_ts ON market_snapshot(ts);
-CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbol, ts);
-`;
+  created_at       INTEGER DEFAULT (strftime('%s','now'))
+)`;
+const STMT_IDX_1 = `CREATE INDEX IF NOT EXISTS idx_snap_ts ON market_snapshot(ts)`;
+const STMT_IDX_2 = `CREATE INDEX IF NOT EXISTS idx_snap_ex_sym_ts ON market_snapshot(exchange, symbol, ts)`;
 
+let schemaReadySet = new WeakSet();
 async function ensureSchema(db) {
-  await db.exec(SCHEMA_SQL);
+  if (schemaReadySet.has(db)) return;
+  await db.prepare(STMT_TABLE).run();
+  await db.prepare(STMT_IDX_1).run();
+  await db.prepare(STMT_IDX_2).run();
+  schemaReadySet.add(db);
 }
 
 const COLS = '(ts, exchange, symbol, price, volume_24h, open_interest, funding_rate, taker_buy_volume)';
