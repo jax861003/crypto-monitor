@@ -501,7 +501,6 @@ function serveDashboard() {
     redraw();
   }
   themeBtn.addEventListener('click', () => applyTheme(curTheme() === 'dark' ? 'light' : 'dark', true));
-  try { applyTheme(localStorage.getItem('cm-theme') || 'dark', false); } catch(e){ redraw(); }
 
   const symSel = document.getElementById('symbol');
   const metSel = document.getElementById('metric');
@@ -533,6 +532,9 @@ function serveDashboard() {
 
   let chart;
   let lastQuery = null; // { rows, exs, metric } —— 主题切换后重绘用
+  // 主题初始化必须在 chart/lastQuery 声明之后（applyTheme→redraw 会读 lastQuery，
+  // 放在 let 声明前会踩 TDZ 抛 ReferenceError，导致整段脚本崩掉：时间/币种/指标下拉全空）
+  try { applyTheme(localStorage.getItem('cm-theme') || 'dark', false); } catch(e){}
   document.getElementById('run').addEventListener('click', run);
 
   function metricLabel(key){ const m = METRICS.find(x=>x.key===key); return m ? m.label : key; }
