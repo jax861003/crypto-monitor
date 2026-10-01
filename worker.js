@@ -81,13 +81,25 @@ function num(v) {
 // 6 币 ≈ 45 个子请求（Binance 8 + OKX 13 + Bybit 12 + Gate 12）；观察池超过 ~7 个币会撞上限。
 
 // ---------- Binance ----------
+// api.binance.com 对部分 Cloudflare 边缘节点返回 403/451（地理封锁）。
+// data-api.binance.vision 是官方公开行情镜像，专门服务公共市场数据，通常不受封锁；失败再回退主域。
+const BINANCE_SPOT_BASES = ['https://data-api.binance.vision', 'https://api.binance.com'];
+
 async function collectBinance(watch) {
   const syms = [...watch].filter((s) => s.endsWith('USDT'));
   if (!syms.length) return [];
   // 只拉观察池（symbols 参数 = URL 编码的 JSON 数组），避免全市场大 JSON
-  const spot = await fetchJson(
-    `https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(syms))}`
-  );
+  let spot = null;
+  let lastErr = null;
+  for (const base of BINANCE_SPOT_BASES) {
+    try {
+      spot = await fetchJson(`${base}/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(syms))}`);
+      break;
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (!spot) throw lastErr || new Error('binance spot: all bases failed');
   const map = {};
   for (const t of Array.isArray(spot) ? spot : []) {
     map[t.symbol] = {
@@ -99,7 +111,7 @@ async function collectBinance(watch) {
       funding_rate: null,
     };
   }
-  // 资金费率：一次拉全（合约数量有限，响应小）；持仓量：逐 symbol（响应很小）
+  // 资金费率：一次拉全（响应小，失败只降级为 null）；持仓量：逐 symbol
   const prem = await fetchJson('https://fapi.binance.com/fapi/v1/premiumIndex').catch(() => []);
   const fr = new Map((Array.isArray(prem) ? prem : []).map((p) => [p.symbol, num(p.fundingRate)]));
   await Promise.allSettled(
@@ -118,31 +130,27 @@ async function collectBinance(watch) {
 async function collectOkx(watch) {
   const syms = [...watch].filter((s) => s.endsWith('USDT'));
   if (!syms.length) return [];
+  // 一次拉全 SPOT ticker（响应约 160KB，CPU 可承受）；逐个请求易被限流后静默归零
+  const r = await fetchJson('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
   const map = {};
-  // 逐 symbol 拉 ticker（响应小）
-  await Promise.allSettled(
-    syms.map(async (s) => {
-      try {
-        const r = await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${s.replace(/USDT$/, '-USDT')}`);
-        const t = r.data && r.data[0];
-        if (!t) return;
-        map[s] = {
-          exchange: 'okx',
-          symbol: s,
-          price: num(t.last),
-          volume_24h: num(t.vol24h),
-          open_interest: null,
-          funding_rate: null,
-        };
-      } catch {}
-    })
-  );
-  // 资金费率逐个；持仓量一次拉全 SWAP（响应适中）
+  for (const t of (r && r.data) || []) {
+    const sym = String(t.instId).replace(/-USDT$/, '') + 'USDT';
+    if (!watch.has(sym)) continue;
+    map[sym] = {
+      exchange: 'okx',
+      symbol: sym,
+      price: num(t.last),
+      volume_24h: num(t.volCcy24h) != null ? num(t.volCcy24h) : num(t.vol24h), // 优先 USDT 计价量
+      open_interest: null,
+      funding_rate: null,
+    };
+  }
+  // 资金费率逐个（失败只降级为 null）；持仓量一次拉全 SWAP
   await Promise.allSettled(
     Object.keys(map).map(async (s) => {
       try {
-        const r = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${s.replace(/USDT$/, '-USDT')}`);
-        map[s].funding_rate = num(r.data && r.data[0] && r.data[0].fundingRate);
+        const rr = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${s.replace(/USDT$/, '-USDT')}`);
+        map[s].funding_rate = num(rr.data && rr.data[0] && rr.data[0].fundingRate);
       } catch {}
     })
   );

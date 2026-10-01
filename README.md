@@ -135,7 +135,7 @@ const DEFAULT_WATCHLIST = [
   ```
   - `detail` 里哪家 `ok:false`，错误原因一目了然（无需看日志）。
   - `inserted > 0` 后回面板查询即可；Cron 之后每 15 分钟自动补数据。
-- Binance 对美区 IP 返回 451 属正常，代码已降级只记另三家。
+- **Binance 403/451**：`api.binance.com` 对部分 Cloudflare 边缘节点有地理封锁。代码优先走官方公开行情镜像 **`data-api.binance.vision`**（通常不受封锁），失败自动回退主域；两个都挂时 `detail` 会显示真实错误，且不影响另外三家。合约资金费率/持仓量走 `fapi.binance.com`，失败只降级为空值。
 - **观察池别超过 ~7 个币**：免费版 Worker 单次调用上限 50 个子请求，6 币 ≈ 45 个；超了会有一部分交易所采不满。
 - 采集改为按观察池逐个小请求（免费版 10ms CPU 拉不动全市场大 JSON，这是早期「查询一直 0 条」的根因）。
 
