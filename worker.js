@@ -74,172 +74,184 @@ function num(v) {
   return Number.isFinite(n) ? n : null;
 }
 
+// ---------- 采集策略说明 ----------
+// 免费版 Worker 单次调用 CPU 仅 10ms：拉全市场大 JSON（Binance/Bybit 全 ticker ≈ 1MB+），
+// 光 JSON.parse 就会超限，后台任务被静默掐死，D1 一条都写不进。
+// 因此全部改为「按观察池逐个小请求」，单个响应仅几百字节；同时控制总子请求数在免费版 50 上限内。
+// 6 币 ≈ 45 个子请求（Binance 8 + OKX 13 + Bybit 12 + Gate 12）；观察池超过 ~7 个币会撞上限。
+
 // ---------- Binance ----------
 async function collectBinance(watch) {
-  const spotBase = 'https://api.binance.com';
-  const fBase = 'https://fapi.binance.com';
-  // Binance 主站对美区 IP 返回 451（地理封锁）。Cloudflare 边缘多在非美区，常能通但不保证；
-  // 失败会被 collectAll 捕获并跳过，不影响其他三家。
-  const [spot, prem] = await Promise.all([
-    fetchJson(`${spotBase}/api/v3/ticker/24hr`).catch(() => []),
-    fetchJson(`${fBase}/fapi/v1/premiumIndex`).catch(() => []),
-  ]);
+  const syms = [...watch].filter((s) => s.endsWith('USDT'));
+  if (!syms.length) return [];
+  // 只拉观察池（symbols 参数 = URL 编码的 JSON 数组），避免全市场大 JSON
+  const spot = await fetchJson(
+    `https://api.binance.com/api/v3/ticker/24hr?symbols=${encodeURIComponent(JSON.stringify(syms))}`
+  );
   const map = {};
-  for (const t of spot) {
-    if (watch.has(t.symbol)) {
-      map[t.symbol] = {
-        exchange: 'binance',
-        symbol: t.symbol,
-        price: num(t.lastPrice),
-        volume_24h: num(t.quoteVolume),
-        open_interest: null,
-        funding_rate: null,
-      };
-    }
+  for (const t of Array.isArray(spot) ? spot : []) {
+    map[t.symbol] = {
+      exchange: 'binance',
+      symbol: t.symbol,
+      price: num(t.lastPrice),
+      volume_24h: num(t.quoteVolume),
+      open_interest: null,
+      funding_rate: null,
+    };
   }
-  const fr = new Map(prem.map((p) => [p.symbol, num(p.fundingRate)]));
-  const oi = await Promise.allSettled(
+  // 资金费率：一次拉全（合约数量有限，响应小）；持仓量：逐 symbol（响应很小）
+  const prem = await fetchJson('https://fapi.binance.com/fapi/v1/premiumIndex').catch(() => []);
+  const fr = new Map((Array.isArray(prem) ? prem : []).map((p) => [p.symbol, num(p.fundingRate)]));
+  await Promise.allSettled(
     Object.keys(map).map(async (s) => {
-      const r = await fetchJson(`${fBase}/fapi/v1/openInterest?symbol=${s}`);
-      return { s, oi: num(r.openInterest) };
+      try {
+        const r = await fetchJson(`https://fapi.binance.com/fapi/v1/openInterest?symbol=${s}`);
+        map[s].open_interest = num(r.openInterest);
+      } catch {}
     })
   );
-  for (const x of oi) {
-    if (x.status === 'fulfilled' && map[x.value.s]) map[x.value.s].open_interest = x.value.oi;
-  }
   for (const [s, v] of Object.entries(map)) if (fr.has(s)) v.funding_rate = fr.get(s);
   return Object.values(map);
 }
 
 // ---------- OKX ----------
 async function collectOkx(watch) {
-  const r = await fetchJson('https://www.okx.com/api/v5/market/tickers?instType=SPOT');
+  const syms = [...watch].filter((s) => s.endsWith('USDT'));
+  if (!syms.length) return [];
   const map = {};
-  for (const t of r.data || []) {
-    const sym = norm(t.instId);
-    if (watch.has(sym)) {
-      map[sym] = {
-        exchange: 'okx',
-        symbol: sym,
-        price: num(t.last),
-        volume_24h: num(t.vol24h),
-        open_interest: null,
-        funding_rate: null,
-      };
-    }
-  }
-  const insts = Object.keys(map).map((s) => s.replace('USDT', '-USDT'));
-  const [fr, oi] = await Promise.all([
-    Promise.allSettled(
-      insts.map(async (i) => {
-        const r = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${i}`);
-        return { i, v: num(r.data?.[0]?.fundingRate) };
-      })
-    ),
-    Promise.allSettled(
-      insts.map(async (i) => {
-        const r = await fetchJson(`https://www.okx.com/api/v5/public/open-interest?instType=SWAP&instId=${i}`);
-        return { i, v: num(r.data?.[0]?.oi) };
-      })
-    ),
-  ]);
-  const frMap = new Map(fr.filter((x) => x.status === 'fulfilled').map((x) => [norm(x.value.i), x.value.v]));
-  const oiMap = new Map(oi.filter((x) => x.status === 'fulfilled').map((x) => [norm(x.value.i), x.value.v]));
-  for (const [sym, v] of Object.entries(map)) {
-    if (frMap.has(sym)) v.funding_rate = frMap.get(sym);
-    if (oiMap.has(sym)) v.open_interest = oiMap.get(sym);
-  }
+  // 逐 symbol 拉 ticker（响应小）
+  await Promise.allSettled(
+    syms.map(async (s) => {
+      try {
+        const r = await fetchJson(`https://www.okx.com/api/v5/market/ticker?instId=${s.replace(/USDT$/, '-USDT')}`);
+        const t = r.data && r.data[0];
+        if (!t) return;
+        map[s] = {
+          exchange: 'okx',
+          symbol: s,
+          price: num(t.last),
+          volume_24h: num(t.vol24h),
+          open_interest: null,
+          funding_rate: null,
+        };
+      } catch {}
+    })
+  );
+  // 资金费率逐个；持仓量一次拉全 SWAP（响应适中）
+  await Promise.allSettled(
+    Object.keys(map).map(async (s) => {
+      try {
+        const r = await fetchJson(`https://www.okx.com/api/v5/public/funding-rate?instId=${s.replace(/USDT$/, '-USDT')}`);
+        map[s].funding_rate = num(r.data && r.data[0] && r.data[0].fundingRate);
+      } catch {}
+    })
+  );
+  try {
+    const oi = await fetchJson('https://www.okx.com/api/v5/public/open-interest?instType=SWAP');
+    const oiMap = new Map(
+      ((oi && oi.data) || []).map((o) => [String(o.instId).replace(/-USDT-SWAP$/, '') + 'USDT', num(o.oi)])
+    );
+    for (const [s, v] of Object.entries(map)) if (oiMap.has(s)) v.open_interest = oiMap.get(s);
+  } catch {}
   return Object.values(map);
 }
 
 // ---------- Bybit ----------
 async function collectBybit(watch) {
-  const r = await fetchJson('https://api.bybit.com/v5/market/tickers?category=linear');
-  const list = r.result?.list || [];
+  const syms = [...watch].filter((s) => s.endsWith('USDT'));
+  if (!syms.length) return [];
   const map = {};
-  for (const t of list) {
-    const sym = norm(t.symbol);
-    if (watch.has(sym)) {
-      map[sym] = {
-        exchange: 'bybit',
-        symbol: sym,
-        price: num(t.lastPrice),
-        volume_24h: num(t.volume24h),
-        open_interest: null,
-        funding_rate: t.fundingRate != null ? num(t.fundingRate) : null,
-      };
-    }
-  }
-  const oi = await Promise.allSettled(
-    Object.keys(map).map(async (s) => {
-      const r = await fetchJson(`https://api.bybit.com/v5/market/open-interest?category=linear&symbol=${s}`);
-      return { s, oi: num(r.result?.openInterest) };
+  await Promise.allSettled(
+    syms.map(async (s) => {
+      try {
+        const r = await fetchJson(`https://api.bybit.com/v5/market/tickers?category=linear&symbol=${s}`);
+        const t = r.result && r.result.list && r.result.list[0];
+        if (!t) return;
+        map[s] = {
+          exchange: 'bybit',
+          symbol: s,
+          price: num(t.lastPrice),
+          volume_24h: num(t.volume24h),
+          open_interest: null,
+          funding_rate: t.fundingRate != null ? num(t.fundingRate) : null,
+        };
+      } catch {}
     })
   );
-  for (const x of oi) {
-    if (x.status === 'fulfilled' && map[x.value.s]) map[x.value.s].open_interest = x.value.oi;
-  }
+  await Promise.allSettled(
+    Object.keys(map).map(async (s) => {
+      try {
+        const r = await fetchJson(
+          `https://api.bybit.com/v5/market/open-interest?category=linear&symbol=${s}&intervalTime=5min&limit=1`
+        );
+        const oi = r.result && r.result.list && r.result.list[0] && r.result.list[0].openInterest;
+        if (oi != null) map[s].open_interest = num(oi);
+      } catch {}
+    })
+  );
   return Object.values(map);
 }
 
 // ---------- Gate.io ----------
 async function collectGate(watch) {
-  const [spot, fut] = await Promise.all([
-    fetchJson('https://api.gateio.ws/api/v4/spot/tickers').catch(() => []),
-    fetchJson('https://api.gateio.ws/api/v4/futures/usdt/contracts').catch(() => []),
-  ]);
+  const syms = [...watch].filter((s) => s.endsWith('USDT'));
+  if (!syms.length) return [];
   const map = {};
-  for (const t of spot) {
-    const sym = norm(t.currency_pair);
-    if (watch.has(sym)) {
-      map[sym] = {
-        exchange: 'gate',
-        symbol: sym,
-        price: num(t.last),
-        volume_24h: num(t.quote_volume),
-        open_interest: null,
-        funding_rate: null,
-      };
-    }
-  }
-  const fr = new Map(fut.map((c) => [norm(c.contract), num(c.funding_rate)]));
-  for (const [sym, v] of Object.entries(map)) if (fr.has(sym)) v.funding_rate = fr.get(sym);
-  const oi = await Promise.allSettled(
-    Object.keys(map).map(async (s) => {
+  await Promise.allSettled(
+    syms.map(async (s) => {
+      const pair = s.replace(/USDT$/, '_USDT');
       try {
-        const r = await fetchJson(`https://api.gateio.ws/api/v4/futures/usdt/contracts/${s.replace('USDT', '_USDT')}`);
-        return { s, oi: num(r.total_size) };
-      } catch {
-        return { s, oi: null };
-      }
+        const t = await fetchJson(`https://api.gateio.ws/api/v4/spot/tickers?currency_pair=${pair}`);
+        const x = Array.isArray(t) ? t[0] : t;
+        if (!x) return;
+        map[s] = {
+          exchange: 'gate',
+          symbol: s,
+          price: num(x.last),
+          volume_24h: num(x.quote_volume),
+          open_interest: null,
+          funding_rate: null,
+        };
+      } catch {}
+      try {
+        const c = await fetchJson(`https://api.gateio.ws/api/v4/futures/usdt/contracts/${pair}`);
+        map[s].funding_rate = num(c.funding_rate);
+        map[s].open_interest = num(c.open_interest != null ? c.open_interest : c.total_size);
+      } catch {}
     })
   );
-  for (const x of oi) {
-    if (x.status === 'fulfilled' && map[x.value.s]) map[x.value.s].open_interest = x.value.oi;
-  }
   return Object.values(map);
 }
 
-// 并行采集四家，单家失败不影响其他家
+// 并行采集四家，单家失败不影响其他家；返回 { rows, detail }（detail 供 /api/ingest 直接返回给浏览器排障）
+const EXCHANGE_FNS = [
+  ['binance', collectBinance],
+  ['okx', collectOkx],
+  ['bybit', collectBybit],
+  ['gate', collectGate],
+];
+
 async function collectAll(watchlist) {
   const watch = new Set((watchlist || []).map(norm));
   const ts = Date.now();
-  const results = await Promise.allSettled([
-    collectBinance(watch),
-    collectOkx(watch),
-    collectBybit(watch),
-    collectGate(watch),
-  ]);
+  const results = await Promise.allSettled(EXCHANGE_FNS.map(([, f]) => f(watch)));
   const rows = [];
+  const detail = [];
   results.forEach((r, i) => {
-    const name = ['binance', 'okx', 'bybit', 'gate'][i];
+    const name = EXCHANGE_FNS[i][0];
     if (r.status === 'fulfilled') {
       for (const row of r.value) rows.push({ ts, ...row });
+      detail.push({ exchange: name, ok: true, count: r.value.length });
     } else {
-      console.error(`[collect] ${name} failed:`, r.reason?.message || r.reason);
+      detail.push({
+        exchange: name,
+        ok: false,
+        count: 0,
+        error: String((r.reason && r.reason.message) || r.reason).slice(0, 200),
+      });
     }
   });
-  return rows;
+  return { rows, detail };
 }
 
 // ============================================================
@@ -550,15 +562,16 @@ function serveDashboard() {
 // 入口
 // ============================================================
 async function runIngest(env) {
+  const { rows, detail } = await collectAll(getWatchlist(env));
+  let inserted = 0;
+  let error = null;
   try {
-    const rows = await collectAll(getWatchlist(env));
-    const n = await insertSnapshots(env.DB, rows);
-    console.log(`[ingest] collected=${rows.length} inserted=${n}`);
-    return n;
+    inserted = await insertSnapshots(env.DB, rows);
   } catch (e) {
-    console.error('[ingest] failed:', e && e.message ? e.message : e);
-    return 0;
+    error = 'D1 写入失败：' + ((e && e.message) || String(e));
   }
+  console.log(`[ingest] collected=${rows.length} inserted=${inserted}${error ? ' error=' + error : ''}`);
+  return { collected: rows.length, inserted, detail, error };
 }
 
 function numOrNull(v) {
@@ -621,9 +634,9 @@ export default {
             { status: 200 }
           );
         }
-        // 手动触发一次采集（初始化 D1 建表也走这里）。免费额度下也可用此代替 Cron。
-        ctx.waitUntil(runIngest(env));
-        return Response.json({ ok: true, msg: 'ingest scheduled' });
+        // 同步执行，把每家交易所的采集条数/错误直接返回给浏览器，便于排障
+        const result = await runIngest(env);
+        return Response.json({ ok: true, ...result });
       }
       return serveDashboard();
     } catch (e) {

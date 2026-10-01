@@ -125,7 +125,17 @@ const DEFAULT_WATCHLIST = [
 > 现在代码已做防护：D1 缺失/`query` 异常时统一返回 **JSON 错误**（含中文提示），不再吐 HTML；前端也会把错误原文显示出来，方便定位。若仍看到 `<!DOCTYPE`，说明请求根本没打到本 Worker（路由/域名问题），检查子域是否正确。
 
 ### 面板能打开但查询无数据
-- 还没触发过采集：访问 `/api/ingest` 一次（或等 Cron 跑）。
-- 采集失败看 `/api/health` 是否 `ok:true`；具体采集情况看 Worker → Logs（需开启）。
+- 访问一次 `/api/ingest` —— 现在**同步执行并直接返回每家交易所的结果**：
+  ```json
+  {"ok":true,"collected":24,"inserted":24,"detail":[
+    {"exchange":"binance","ok":true,"count":6},
+    {"exchange":"okx","ok":true,"count":6},
+    {"exchange":"bybit","ok":false,"count":0,"error":"HTTP 451 ..."}
+  ],"error":null}
+  ```
+  - `detail` 里哪家 `ok:false`，错误原因一目了然（无需看日志）。
+  - `inserted > 0` 后回面板查询即可；Cron 之后每 15 分钟自动补数据。
 - Binance 对美区 IP 返回 451 属正常，代码已降级只记另三家。
+- **观察池别超过 ~7 个币**：免费版 Worker 单次调用上限 50 个子请求，6 币 ≈ 45 个；超了会有一部分交易所采不满。
+- 采集改为按观察池逐个小请求（免费版 10ms CPU 拉不动全市场大 JSON，这是早期「查询一直 0 条」的根因）。
 
